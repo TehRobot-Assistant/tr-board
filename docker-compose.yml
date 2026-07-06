@@ -1,8 +1,13 @@
-# TR Board — self-hosted Trello. `docker compose up -d` and open :3850.
-# First registered account becomes the instance admin.
+# TR Board — self-hosted Trello. Pulls the pre-built image from GHCR, so it
+# runs on Unraid (Compose Manager plugin) or any Docker host with no build step:
+#
+#   POSTGRES_PASSWORD=<something-long> docker compose up -d
+#
+# Then open http://<host>:3850 — the first account you register becomes the
+# instance admin. To build from source instead, use docker-compose.build.yml.
 services:
   app:
-    build: .
+    image: ghcr.io/tehrobot-assistant/tr-board:latest
     container_name: trboard
     restart: unless-stopped
     ports:

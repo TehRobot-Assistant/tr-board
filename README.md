@@ -14,25 +14,48 @@ React 19 + TS + Vite + Tailwind v4 + dnd-kit + zustand + TanStack Query ·
 Fastify 5 + Socket.IO + Zod · PostgreSQL 16 + Drizzle (SQL migrations applied
 automatically on boot) · single Docker image, compose with Postgres.
 
-## Deploy (Unraid or any Docker host)
+The image is published to GHCR — **no build step, no registry login**:
+`ghcr.io/tehrobot-assistant/tr-board:latest` (built and pushed automatically
+by GitHub Actions on every push).
+
+## Deploy on any Docker host
 
 ```sh
 POSTGRES_PASSWORD=<something-long> docker compose up -d
 ```
 
-Open `http://<host>:3850` — **the first account registered becomes the
-instance admin.** After creating your users, set `ALLOW_REGISTRATION=false`
-in the compose environment and `docker compose up -d` again to close signup
-(admins can still create users from /admin).
+`docker-compose.yml` pulls the pre-built image and starts Postgres alongside it.
+Open `http://<host>:3850` — **the first account registered becomes the instance
+admin.** After creating your users, set `ALLOW_REGISTRATION=false` in the compose
+environment and `docker compose up -d` again to close signup (admins can still
+create users from /admin). To build from source instead of pulling, use
+`docker compose -f docker-compose.build.yml up -d --build`.
 
-Unraid notes:
-- Use the *Compose Manager* plugin (or `docker compose` via terminal) with this
-  folder. Host port `3850` is arbitrary — change the mapping if taken.
-- Volumes: `pgdata` (database) and `uploads` (attachments). Back up both —
-  `docker exec trboard-db pg_dump -U trboard trboard > trboard.sql` plus a copy
-  of the uploads volume.
-- Behind NPM/Cloudflare: proxy to port 3850, enable websockets. Cookies are
-  `Secure` automatically when served over https.
+## Deploy on Unraid
+
+**Easiest — Compose Manager plugin (brings up the app + Postgres together):**
+
+1. Install the **Compose Manager** plugin from Community Applications.
+2. Add a new stack called `tr-board`, and paste the contents of
+   [`docker-compose.yml`](docker-compose.yml).
+3. Set a strong `POSTGRES_PASSWORD` (edit the compose or add a `.env`), then
+   **Compose Up**. Both containers appear on the Docker tab.
+4. Open `http://<tower-ip>:3850` and register the first account (= admin).
+
+**Alternative — Community Applications template (app container only):** use
+[`unraid/tr-board.xml`](unraid/tr-board.xml) if you'd rather run the app as a
+native Unraid container and point it at your **own** PostgreSQL 16 container via
+`DATABASE_URL`. (The app image does not include a database.)
+
+Notes:
+- Host port `3850` is arbitrary — change the mapping if it's taken.
+- Data lives in two volumes: **Postgres data** and **uploads** (attachments).
+  Map the uploads path to `/mnt/user/appdata/tr-board/uploads` so it sits on the
+  array. Back up both — `docker exec trboard-db pg_dump -U trboard trboard >
+  trboard.sql` plus a copy of the uploads directory.
+- Behind NGINX Proxy Manager / Cloudflare: proxy to port 3850 and **enable
+  WebSockets** (live sync needs them). Cookies become `Secure` automatically
+  once served over https.
 
 ## Permissions model (the point of the thing)
 
