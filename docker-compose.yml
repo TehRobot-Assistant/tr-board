@@ -1,0 +1,38 @@
+# TR Board — self-hosted Trello. `docker compose up -d` and open :3850.
+# First registered account becomes the instance admin.
+services:
+  app:
+    build: .
+    container_name: trboard
+    restart: unless-stopped
+    ports:
+      - "3850:8841" # host:container — change 3850 if taken on Unraid
+    environment:
+      DATABASE_URL: postgres://trboard:${POSTGRES_PASSWORD:-trboard}@db:5432/trboard
+      # set to "false" after creating your accounts to lock the door
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: trboard-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trboard}
+      POSTGRES_DB: trboard
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trboard -d trboard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  uploads:
+  pgdata:

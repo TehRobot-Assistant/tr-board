@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* TR Studios v3 — paper + ink + highlighter yellow */
+@theme {
+  --color-paper: #f7f5f0;
+  --color-paper-2: #efece4;
+  --color-ink: #16181d;
+  --color-ink-2: #23262e;
+  --color-ink-3: #2e323c;
+  --color-accent: #ffe600;
+  --color-rule: #d9d4c8;
+
+  --font-sans: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Funnel Display", var(--font-sans);
+
+  --radius-card: 10px;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.06);
+  --shadow-drag: 0 8px 24px rgb(0 0 0 / 0.3);
+}
+
+html, body, #root { height: 100%; }
+body {
+  @apply bg-paper text-ink font-sans antialiased dark:bg-ink dark:text-paper;
+}
+
+/* board backgrounds */
+.bg-board-navy { background: linear-gradient(160deg, #1e2a44, #14203a); }
+.bg-board-sky { background: linear-gradient(160deg, #2273a8, #1a5680); }
+.bg-board-teal { background: linear-gradient(160deg, #167a72, #0f5a54); }
+.bg-board-forest { background: linear-gradient(160deg, #2c6e3f, #1e5230); }
+.bg-board-amber { background: linear-gradient(160deg, #b3771e, #8f5c13); }
+.bg-board-crimson { background: linear-gradient(160deg, #a83a38, #822a29); }
+.bg-board-plum { background: linear-gradient(160deg, #6d4185, #533064); }
+.bg-board-slate { background: linear-gradient(160deg, #4a5568, #37404e); }
+.bg-board-ink { background: linear-gradient(160deg, #23262e, #16181d); }
+
+/* thin scrollbars for the board canvas */
+.board-scroll { scrollbar-width: thin; scrollbar-color: rgb(255 255 255 / 0.35) transparent; }
+.board-scroll::-webkit-scrollbar { height: 10px; width: 10px; }
+.board-scroll::-webkit-scrollbar-thumb { background: rgb(255 255 255 / 0.3); border-radius: 5px; }
+
+.input {
+  @apply w-full rounded-md border border-rule bg-white px-3 py-2 text-sm text-ink outline-none
+    focus:border-ink/50 dark:border-ink-3 dark:bg-ink-2 dark:text-paper dark:focus:border-paper/40;
+}
+/* @utility so the btn base can be @apply'd by the variants below (Tailwind v4) */
+@utility btn {
+  @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium
+    transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+}
+.btn-accent { @apply btn bg-accent text-ink hover:brightness-95; }
+.btn-ink { @apply btn bg-ink text-paper hover:bg-ink-2 dark:bg-paper dark:text-ink dark:hover:bg-paper-2; }
+.btn-ghost { @apply btn text-ink/70 hover:bg-ink/8 dark:text-paper/70 dark:hover:bg-paper/10; }
+.btn-danger { @apply btn bg-[#b03a37] text-white hover:brightness-110; }
+
+.menu-panel {
+  @apply rounded-lg border border-rule bg-white p-3 shadow-lg dark:border-ink-3 dark:bg-ink-2;
+}
