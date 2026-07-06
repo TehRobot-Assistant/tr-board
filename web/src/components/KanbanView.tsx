@@ -269,7 +269,7 @@ function SortableCard({ card }: { card: Card }) {
       {...attributes}
       {...listeners}
     >
-      <CardChip card={card} />
+      <CardChip card={card} expandable />
     </div>
   );
 }

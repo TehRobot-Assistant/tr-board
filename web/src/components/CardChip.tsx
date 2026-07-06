@@ -1,6 +1,10 @@
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../lib/api";
+import { getSocket } from "../lib/socket";
 import { useBoard } from "../stores/board";
-import type { Card } from "../lib/types";
+import type { Card, CardDetail } from "../lib/types";
 import { Avatar } from "./Chrome";
 
 export function dueTone(card: Card): string {
@@ -17,10 +21,15 @@ export function fmtDue(iso: string): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-export default function CardChip({ card, overlay = false }: { card: Card; overlay?: boolean }) {
+export default function CardChip({
+  card, overlay = false, expandable = false,
+}: { card: Card; overlay?: boolean; expandable?: boolean }) {
   const labels = useBoard((s) => s.labels);
   const members = useBoard((s) => s.members);
   const defs = useBoard((s) => s.customFieldDefs);
+  const links = useBoard((s) => s.links);
+  const cards = useBoard((s) => s.cards);
+  const [expanded, setExpanded] = useState(false);
 
   // mirrors render the SOURCE card's face and link to the source
   if (card.mirrorOfCardId) return <MirrorChip card={card} overlay={overlay} />;
@@ -30,19 +39,16 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
   const frontFields = defs.filter((d) => d.showOnFront && card.fieldValues[d.id] !== undefined);
   const b = card.badges;
   // blocked = some blocker card is still open (not archived / not due-complete)
-  const links = useBoard((s) => s.links);
-  const cards = useBoard((s) => s.cards);
   const openBlockers = links
     .filter((l) => l.blocksCardId === card.id)
     .map((l) => cards.find((c) => c.id === l.cardId))
     .filter((c) => c && !c.archived && !c.dueComplete);
 
-  const body = (
-    <div
-      className={`rounded-card bg-white p-2.5 text-sm shadow-card transition-shadow dark:bg-ink-3 ${
-        overlay ? "rotate-2 shadow-drag" : "hover:ring-2 hover:ring-accent"
-      }`}
-    >
+  // is there anything worth expanding in-place?
+  const hasMore = !!card.description.trim() || b.comments > 0 || b.attachments > 0;
+
+  const inner = (
+    <>
       {card.coverColor && (
         <div className="-mx-2.5 -mt-2.5 mb-2 h-8 rounded-t-card" style={{ background: card.coverColor }} />
       )}
@@ -115,15 +121,212 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
           )}
         </div>
       )}
-    </div>
+    </>
   );
 
-  if (overlay) return body;
+  const shell = "rounded-card bg-white text-sm shadow-card transition-shadow dark:bg-ink-3";
+
+  if (overlay) return <div className={`${shell} rotate-2 p-2.5 shadow-drag`}>{inner}</div>;
+
   return (
-    <Link to={`/b/${card.boardId}/c/${card.id}`} draggable={false} className="block">
-      {body}
-    </Link>
+    <div className={`${shell} ${expanded ? "ring-2 ring-accent" : "hover:ring-2 hover:ring-accent"}`}>
+      <Link to={`/b/${card.boardId}/c/${card.id}`} draggable={false} className="block p-2.5">
+        {inner}
+      </Link>
+      {expandable && hasMore && (
+        <button
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setExpanded((v) => !v); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="flex w-full items-center justify-center gap-1 border-t border-ink/5 py-1 text-[11px] opacity-50 transition-opacity hover:opacity-100 dark:border-paper/10"
+          title={expanded ? "Collapse" : "Preview description, comments & attachments"}
+        >
+          {expanded ? "▲ Less" : "▼ Preview"}
+        </button>
+      )}
+      {expanded && <ExpandedCard card={card} onClose={() => setExpanded(false)} />}
+    </div>
   );
+}
+
+/* ---------------------------------------------------------- inline expand */
+
+/**
+ * The "card back" without leaving the board: description, attachment previews
+ * (images inline, files as links), and comments with a quick reply. Fetched
+ * on demand and kept live via the same board socket events.
+ */
+function ExpandedCard({ card, onClose }: { card: Card; onClose: () => void }) {
+  const qc = useQueryClient();
+  const canWrite = !!useBoard((s) => s.myAccess?.canWrite);
+  const { data } = useQuery({
+    queryKey: ["card", card.id],
+    queryFn: () => api.get<CardDetail>(`/api/cards/${card.id}`),
+    staleTime: 5_000,
+  });
+
+  // live-refresh while open when this card changes on the board
+  useEffect(() => {
+    const socket = getSocket();
+    const refresh = (p: { cardId?: string }) => {
+      if (p?.cardId === card.id) qc.invalidateQueries({ queryKey: ["card", card.id] });
+    };
+    for (const ev of ["comment.created", "comment.deleted", "attachment.created", "attachment.deleted", "card.updated"]) {
+      socket.on(ev, refresh);
+    }
+    return () => {
+      for (const ev of ["comment.created", "comment.deleted", "attachment.created", "attachment.deleted", "card.updated"]) {
+        socket.off(ev, refresh);
+      }
+    };
+  }, [card.id, qc]);
+
+  const [reply, setReply] = useState("");
+  // stop drag/nav starting from inside the panel
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+
+  const images = (data?.attachments ?? []).filter((a) => a.mime.startsWith("image/"));
+  const files = (data?.attachments ?? []).filter((a) => !a.mime.startsWith("image/"));
+
+  return (
+    <div className="space-y-3 border-t border-ink/8 p-2.5 dark:border-paper/10" onPointerDown={stop} onClick={stop}>
+      {card.description.trim() && (
+        <div className="text-[13px] leading-snug opacity-90">
+          <RichText text={card.description} />
+        </div>
+      )}
+
+      {images.length > 0 && (
+        <div className="grid grid-cols-2 gap-1.5">
+          {images.map((a) => (
+            <a key={a.id} href={`/api/attachments/${a.id}/file`} target="_blank" rel="noreferrer" title={a.filename}>
+              <img
+                src={`/api/attachments/${a.id}/file`}
+                alt={a.filename}
+                loading="lazy"
+                className="h-24 w-full rounded-md object-cover ring-1 ring-ink/10 dark:ring-paper/15"
+              />
+            </a>
+          ))}
+        </div>
+      )}
+
+      {files.map((a) => (
+        <a
+          key={a.id}
+          href={`/api/attachments/${a.id}/file`}
+          target="_blank"
+          rel="noreferrer"
+          className="flex items-center gap-2 rounded-md border border-rule px-2 py-1.5 text-[13px] hover:bg-ink/5 dark:border-ink-3 dark:hover:bg-paper/10"
+        >
+          <span>{fileIcon(a.mime)}</span>
+          <span className="min-w-0 flex-1 truncate">{a.filename}</span>
+          <span className="shrink-0 text-[11px] opacity-50">{fmtBytes(a.size)}</span>
+        </a>
+      ))}
+
+      {(data?.comments ?? []).length > 0 && (
+        <ul className="space-y-2">
+          {data!.comments.slice(0, 4).map((c) => (
+            <li key={c.id} className="flex gap-1.5">
+              <Avatar name={c.userName ?? "⚙"} color={c.avatarColor ?? "#838c91"} size={20} />
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] opacity-60">
+                  <span className="font-semibold opacity-90">{c.userName ?? "⚙ Automation"}</span>{" "}
+                  {new Date(c.createdAt).toLocaleDateString(undefined, { day: "numeric", month: "short" })}
+                </p>
+                <div className="text-[13px] leading-snug"><RichText text={c.body} /></div>
+              </div>
+            </li>
+          ))}
+          {data!.comments.length > 4 && (
+            <li>
+              <Link to={`/b/${card.boardId}/c/${card.id}`} className="text-[11px] underline opacity-60" onClick={stop}>
+                View all {data!.comments.length} comments
+              </Link>
+            </li>
+          )}
+        </ul>
+      )}
+
+      {canWrite && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!reply.trim()) return;
+            await api.post(`/api/cards/${card.id}/comments`, { body: reply.trim() });
+            setReply("");
+            qc.invalidateQueries({ queryKey: ["card", card.id] });
+          }}
+        >
+          <input
+            className="input !py-1 text-[13px]"
+            placeholder="Write a comment…"
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+          />
+        </form>
+      )}
+
+      <div className="flex justify-between">
+        <Link to={`/b/${card.boardId}/c/${card.id}`} className="text-[11px] underline opacity-60" onClick={stop}>
+          Open full card
+        </Link>
+        <button className="text-[11px] opacity-60 hover:opacity-100" onClick={onClose}>Collapse ▲</button>
+      </div>
+    </div>
+  );
+}
+
+const IMG_URL_RE = /\.(png|jpe?g|gif|webp|avif|svg)(\?[^\s]*)?$/i;
+const URL_RE = /(https?:\/\/[^\s<]+)/g;
+
+/** minimal rich text: linkify URLs (image URLs get a thumbnail), keep newlines, **bold** */
+function RichText({ text }: { text: string }) {
+  const imageUrls: string[] = [];
+  const nodes: ReactNode[] = text.split(URL_RE).map((part, i) => {
+    if (/^https?:\/\//.test(part)) {
+      if (IMG_URL_RE.test(part)) imageUrls.push(part);
+      return (
+        <a key={i} href={part} target="_blank" rel="noreferrer" className="break-all text-[#2c5a8f] underline dark:text-[#5ba4cf]">
+          {part.replace(/^https?:\/\//, "").slice(0, 48)}
+        </a>
+      );
+    }
+    // lightweight **bold**
+    return part.split(/(\*\*[^*]+\*\*)/).map((seg, j) =>
+      /^\*\*[^*]+\*\*$/.test(seg) ? <strong key={`${i}-${j}`}>{seg.slice(2, -2)}</strong> : <span key={`${i}-${j}`}>{seg}</span>,
+    );
+  });
+  return (
+    <>
+      <p className="whitespace-pre-wrap break-words">{nodes}</p>
+      {imageUrls.length > 0 && (
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          {imageUrls.slice(0, 4).map((u, i) => (
+            <a key={i} href={u} target="_blank" rel="noreferrer">
+              <img src={u} alt="" loading="lazy" className="h-20 w-full rounded-md object-cover ring-1 ring-ink/10 dark:ring-paper/15" />
+            </a>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function fileIcon(mime: string): string {
+  if (mime.startsWith("video/")) return "🎬";
+  if (mime.startsWith("audio/")) return "🎵";
+  if (mime === "application/pdf") return "📕";
+  if (/zip|compressed|tar|rar|7z/.test(mime)) return "🗜";
+  if (/sheet|excel|csv/.test(mime)) return "📊";
+  if (/word|document/.test(mime)) return "📝";
+  return "📄";
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function MirrorChip({ card, overlay }: { card: Card; overlay: boolean }) {
