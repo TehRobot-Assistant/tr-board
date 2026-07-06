@@ -5,7 +5,7 @@
  */
 import { create } from "zustand";
 import type {
-  Board, BoardFull, BoardMember, Card, CustomFieldDef, Label, List, MyAccess,
+  Board, BoardFull, BoardMember, Card, CardLink, CustomFieldDef, Label, List, MyAccess,
 } from "../lib/types";
 import { api } from "../lib/api";
 import { between } from "../lib/rank";
@@ -70,6 +70,7 @@ type BoardState = {
   members: BoardMember[];
   teamIds: string[];
   customFieldDefs: CustomFieldDef[];
+  links: CardLink[];
 
   load(boardId: string): Promise<void>;
   clear(): void;
@@ -147,7 +148,10 @@ export const useBoard = create<BoardState>((set, get) => {
     })),
   );
   on("card.deleted", ({ cardId }) =>
-    set((s) => ({ cards: s.cards.filter((c) => c.id !== cardId) })),
+    set((s) => ({
+      cards: s.cards.filter((c) => c.id !== cardId),
+      links: s.links.filter((l) => l.cardId !== cardId && l.blocksCardId !== cardId),
+    })),
   );
   on("card.labelAdded", ({ cardId, labelId }) =>
     set((s) => ({
@@ -193,6 +197,22 @@ export const useBoard = create<BoardState>((set, get) => {
                   : { ...c.fieldValues, [fieldId]: value },
             }
           : c,
+      ),
+    })),
+  );
+
+  on("link.created", ({ cardId, blocksCardId }) =>
+    set((s) => ({
+      links: s.links.some((l) => l.cardId === cardId && l.blocksCardId === blocksCardId)
+        ? s.links
+        : [...s.links, { cardId, blocksCardId }],
+    })),
+  );
+  on("link.deleted", ({ a, b }) =>
+    set((s) => ({
+      links: s.links.filter(
+        (l) =>
+          !(l.cardId === a && l.blocksCardId === b) && !(l.cardId === b && l.blocksCardId === a),
       ),
     })),
   );
@@ -279,6 +299,7 @@ export const useBoard = create<BoardState>((set, get) => {
     members: [],
     teamIds: [],
     customFieldDefs: [],
+    links: [],
 
     async load(boardId) {
       set({ boardId, loading: true, error: null });
@@ -295,6 +316,7 @@ export const useBoard = create<BoardState>((set, get) => {
           members: data.members,
           teamIds: data.teamIds,
           customFieldDefs: sortRank(data.customFieldDefs),
+          links: data.links ?? [],
         });
       } catch (err: any) {
         set({ loading: false, error: err.message ?? "Failed to load board" });
@@ -306,7 +328,7 @@ export const useBoard = create<BoardState>((set, get) => {
       if (id) getSocket().emit("board:leave", id);
       set({
         boardId: null, board: null, myAccess: null, error: null, filter: EMPTY_FILTER,
-        lists: [], cards: [], labels: [], members: [], teamIds: [], customFieldDefs: [],
+        lists: [], cards: [], labels: [], members: [], teamIds: [], customFieldDefs: [], links: [],
       });
     },
 

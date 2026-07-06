@@ -127,6 +127,9 @@ export type MyAccess = {
   workspaceRole: "admin" | "member" | null;
 };
 
+/** dependency: cardId blocks blocksCardId */
+export type CardLink = { cardId: string; blocksCardId: string };
+
 export type BoardFull = {
   board: Board;
   myAccess: MyAccess;
@@ -136,6 +139,18 @@ export type BoardFull = {
   members: BoardMember[];
   teamIds: string[];
   customFieldDefs: CustomFieldDef[];
+  links: CardLink[];
+};
+
+export type FormDef = {
+  id: string;
+  boardId: string;
+  listId: string;
+  token: string;
+  title: string;
+  description: string;
+  enabled: boolean;
+  fields: Array<{ id: string; label: string; type: string; required: boolean; options?: string[] }>;
 };
 
 export type Checklist = {

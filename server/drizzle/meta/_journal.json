@@ -15,6 +15,13 @@
       "when": 1783357087148,
       "tag": "0001_share-and-mirror",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783368162459,
+      "tag": "0002_deps-and-forms",
+      "breakpoints": true
     }
   ]
 }

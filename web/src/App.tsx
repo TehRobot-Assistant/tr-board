@@ -6,6 +6,8 @@ import WorkspacePage from "./pages/Workspace";
 import BoardPage from "./pages/Board";
 import AdminPage from "./pages/Admin";
 import SharedBoard from "./pages/SharedBoard";
+import MyWork from "./pages/MyWork";
+import PublicForm from "./pages/PublicForm";
 
 function Gate({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -26,6 +28,8 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/share/:token" element={<SharedBoard />} />
+        <Route path="/form/:token" element={<PublicForm />} />
+        <Route path="/my-work" element={<Gate><MyWork /></Gate>} />
         <Route path="/" element={<Gate><Home /></Gate>} />
         <Route path="/w/:workspaceId" element={<Gate><WorkspacePage /></Gate>} />
         <Route path="/b/:boardId" element={<Gate><BoardPage /></Gate>} />

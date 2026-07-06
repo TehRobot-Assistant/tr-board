@@ -29,6 +29,13 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
   const cardMembers = members.filter((m) => card.memberIds.includes(m.id));
   const frontFields = defs.filter((d) => d.showOnFront && card.fieldValues[d.id] !== undefined);
   const b = card.badges;
+  // blocked = some blocker card is still open (not archived / not due-complete)
+  const links = useBoard((s) => s.links);
+  const cards = useBoard((s) => s.cards);
+  const openBlockers = links
+    .filter((l) => l.blocksCardId === card.id)
+    .map((l) => cards.find((c) => c.id === l.cardId))
+    .filter((c) => c && !c.archived && !c.dueComplete);
 
   const body = (
     <div
@@ -73,8 +80,16 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
         </div>
       )}
 
-      {(card.dueAt || b.comments > 0 || b.attachments > 0 || b.checklist || cardMembers.length > 0) && (
+      {(card.dueAt || b.comments > 0 || b.attachments > 0 || b.checklist || cardMembers.length > 0 || openBlockers.length > 0) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] opacity-90">
+          {openBlockers.length > 0 && (
+            <span
+              className="rounded bg-[#b03a37] px-1.5 py-0.5 font-medium text-white"
+              title={`Blocked by: ${openBlockers.map((c) => c!.title).join(", ")}`}
+            >
+              ⛔ blocked
+            </span>
+          )}
           {card.dueAt && (
             <span className={`rounded px-1.5 py-0.5 font-medium ${dueTone(card)}`}>
               ⏱ {fmtDue(card.dueAt)}

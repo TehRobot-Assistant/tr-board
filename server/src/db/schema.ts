@@ -410,6 +410,50 @@ export const automationRuns = pgTable(
   (t) => [index("automation_runs_rule_idx").on(t.ruleId)],
 );
 
+/* ------------------------------------------------------- dependencies */
+
+/** Monday-style dependencies: `card` blocks `blocksCard` (same board only) */
+export const cardLinks = pgTable(
+  "card_links",
+  {
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => cards.id, { onDelete: "cascade" }),
+    blocksCardId: uuid("blocks_card_id")
+      .notNull()
+      .references(() => cards.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.cardId, t.blocksCardId] })],
+);
+
+/* ------------------------------------------------------------- forms */
+
+/** Monday WorkForms: public form → each submission becomes a card */
+export const forms = pgTable(
+  "forms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    listId: uuid("list_id")
+      .notNull()
+      .references(() => lists.id, { onDelete: "cascade" }),
+    token: text("token").notNull().unique(),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    enabled: boolean("enabled").notNull().default(true),
+    /** [{id,label,type:text|textarea|email|number|date|select,required,options?}] */
+    fields: jsonb("fields")
+      .$type<Array<{ id: string; label: string; type: string; required: boolean; options?: string[] }>>()
+      .notNull()
+      .default([]),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("forms_board_idx").on(t.boardId)],
+);
+
 /* -------------------------------------------------- activity + notifications */
 
 export const activityLog = pgTable(

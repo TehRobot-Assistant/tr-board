@@ -18,6 +18,9 @@ import { phase1Routes } from "./routes/phase1.js";
 import { adminRoutes } from "./routes/admin.js";
 import { boardToolsRoutes } from "./routes/boardTools.js";
 import { publicRoutes } from "./routes/public.js";
+import { personalRoutes } from "./routes/personal.js";
+import { depsRoutes } from "./routes/deps.js";
+import { formRoutes, publicFormRoutes } from "./routes/forms.js";
 
 // apply SQL migrations on boot (idempotent — makes `docker compose up` zero-step)
 if (fs.existsSync(new URL("../drizzle", import.meta.url))) {
@@ -62,6 +65,7 @@ app.addHook("preHandler", async (req, reply) => {
 // public endpoints: auth + link-shared board snapshots
 await app.register(authRoutes);
 await app.register(publicRoutes);
+await app.register(publicFormRoutes);
 
 // everything else under /api requires a session
 await app.register(async (secured) => {
@@ -74,6 +78,9 @@ await app.register(async (secured) => {
   await secured.register(phase1Routes);
   await secured.register(adminRoutes);
   await secured.register(boardToolsRoutes);
+  await secured.register(personalRoutes);
+  await secured.register(depsRoutes);
+  await secured.register(formRoutes);
 });
 
 app.get("/api/health", async () => ({ ok: true, name: "TR Board" }));

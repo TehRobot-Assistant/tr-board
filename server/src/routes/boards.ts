@@ -128,6 +128,9 @@ export async function boardRoutes(app: FastifyInstance) {
     const checks = new Map(checkAgg.map((r) => [r.cardId, { total: Number(r.total), done: Number(r.done) }]));
     const mirrorSources = cardRows.filter((c) => c.mirrorOfCardId).map((c) => c.mirrorOfCardId!);
     const mirrors = await mirrorSnapshots(mirrorSources);
+    const links = cardIds.length
+      ? await db.select().from(schema.cardLinks).where(inArray(schema.cardLinks.cardId, cardIds))
+      : [];
 
     return {
       board: access.board,
@@ -154,6 +157,7 @@ export async function boardRoutes(app: FastifyInstance) {
       members: memberRows,
       teamIds: teamGrantRows.map((t) => t.teamId),
       customFieldDefs: fieldDefs,
+      links,
     };
   });
 

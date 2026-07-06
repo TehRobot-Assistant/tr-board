@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { applyTheme, useAuth } from "../lib/auth";
 import { getSocket } from "../lib/socket";
 import { Logo } from "../pages/Login";
+import GlobalSearch from "./GlobalSearch";
 
 export function Avatar({
   name, color, size = 28, title,
@@ -124,6 +125,13 @@ export function TopBar({ transparent = false }: { transparent?: boolean }) {
         TR Board
       </Link>
       <div className="ml-auto flex items-center gap-1">
+        <GlobalSearch transparent={transparent} />
+        <Link
+          to="/my-work"
+          className={`btn-ghost !py-1 text-xs ${transparent ? "!text-white/85 hover:!bg-white/15" : ""}`}
+        >
+          My work
+        </Link>
         {user.isAdmin && (
           <Link to="/admin" className={`btn-ghost !py-1 text-xs ${transparent ? "!text-white/85 hover:!bg-white/15" : ""}`}>
             Admin

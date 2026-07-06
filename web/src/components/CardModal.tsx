@@ -128,6 +128,8 @@ export default function CardModal({ cardId, onClose }: { cardId: string; onClose
             </section>
           )}
 
+          <Dependencies cardId={cardId} canWrite={canWrite} />
+
           {/* description */}
           <section className="mt-5">
             <h3 className="text-xs font-medium uppercase tracking-wide opacity-50">Description</h3>
@@ -711,6 +713,92 @@ function CoverButton({ card, onSave }: { card: { coverColor: string | null }; on
         </>
       )}
     </SidebarPop>
+  );
+}
+
+/** Monday-style dependencies: blocked-by / blocks, same board */
+function Dependencies({ cardId, canWrite }: { cardId: string; canWrite: boolean }) {
+  const s = useBoard();
+  const [adding, setAdding] = useState<null | "blocks" | "blockedBy">(null);
+  const [pick, setPick] = useState("");
+
+  const blockers = s.links.filter((l) => l.blocksCardId === cardId).map((l) => l.cardId);
+  const blocking = s.links.filter((l) => l.cardId === cardId).map((l) => l.blocksCardId);
+  if (!blockers.length && !blocking.length && !canWrite) return null;
+
+  const cardOf = (id: string) => s.cards.find((c) => c.id === id);
+  const linked = new Set([...blockers, ...blocking, cardId]);
+  const candidates = s.cards.filter((c) => !c.archived && !linked.has(c.id) && !c.mirrorOfCardId);
+
+  const Row = ({ id, dir }: { id: string; dir: "blocks" | "blockedBy" }) => {
+    const c = cardOf(id);
+    if (!c) return null;
+    const open = !c.archived && !c.dueComplete;
+    return (
+      <li className="flex items-center gap-2 rounded-md border border-rule px-2 py-1.5 text-sm dark:border-ink-3">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${open ? "bg-[#b03a37]" : "bg-[#519839]"}`} title={open ? "open" : "done"} />
+        <a href={`/b/${c.boardId}/c/${c.id}`} className="min-w-0 flex-1 truncate hover:underline">
+          {c.title}
+        </a>
+        <span className="text-xs opacity-40">{s.lists.find((l) => l.id === c.listId)?.name}</span>
+        {canWrite && (
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 text-xs"
+            onClick={() => api.del(`/api/cards/${cardId}/links/${id}`)}
+            title="Remove dependency"
+          >
+            ×
+          </button>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <section className="mt-5">
+      <h3 className="text-xs font-medium uppercase tracking-wide opacity-50">Dependencies</h3>
+      {blockers.length > 0 && (
+        <>
+          <p className="mt-2 text-xs font-medium text-[#b03a37]">⛔ Blocked by</p>
+          <ul className="mt-1 space-y-1">{blockers.map((id) => <Row key={id} id={id} dir="blockedBy" />)}</ul>
+        </>
+      )}
+      {blocking.length > 0 && (
+        <>
+          <p className="mt-2 text-xs font-medium opacity-70">→ Blocks</p>
+          <ul className="mt-1 space-y-1">{blocking.map((id) => <Row key={id} id={id} dir="blocks" />)}</ul>
+        </>
+      )}
+      {canWrite && (
+        adding ? (
+          <div className="mt-2 flex gap-1">
+            <select className="input !py-1 text-sm" value={pick} onChange={(e) => setPick(e.target.value)} autoFocus>
+              <option value="">{adding === "blockedBy" ? "This card is blocked by…" : "This card blocks…"}</option>
+              {candidates.map((c) => (
+                <option key={c.id} value={c.id}>{c.title}</option>
+              ))}
+            </select>
+            <button
+              className="btn-accent shrink-0 !py-1 text-xs"
+              disabled={!pick}
+              onClick={async () => {
+                await api.put(`/api/cards/${cardId}/links/${pick}`, { direction: adding });
+                setAdding(null);
+                setPick("");
+              }}
+            >
+              Link
+            </button>
+            <button className="btn-ghost shrink-0 !py-1 text-xs" onClick={() => setAdding(null)}>Cancel</button>
+          </div>
+        ) : (
+          <div className="mt-2 flex gap-1">
+            <button className="btn-ghost !py-1 text-xs" onClick={() => setAdding("blockedBy")}>+ blocked by</button>
+            <button className="btn-ghost !py-1 text-xs" onClick={() => setAdding("blocks")}>+ blocks</button>
+          </div>
+        )
+      )}
+    </section>
   );
 }
 

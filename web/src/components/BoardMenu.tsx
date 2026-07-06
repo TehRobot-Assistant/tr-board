@@ -3,10 +3,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useBoard } from "../stores/board";
 import { useAuth } from "../lib/auth";
-import type { AutomationRule, FieldType } from "../lib/types";
+import type { AutomationRule, FieldType, FormDef } from "../lib/types";
 import { Avatar } from "./Chrome";
 
-type Tab = "about" | "share" | "fields" | "automation" | "archive" | "activity";
+type Tab = "about" | "share" | "fields" | "automation" | "forms" | "archive" | "activity";
 
 export default function BoardMenu({ onClose }: { onClose: () => void }) {
   const s = useBoard();
@@ -22,7 +22,7 @@ export default function BoardMenu({ onClose }: { onClose: () => void }) {
   const tabs: Array<[Tab, string]> = [
     ["about", "Board"],
     ["share", "Sharing"],
-    ...(canAdmin ? ([["fields", "Fields"], ["automation", "Automation"]] as Array<[Tab, string]>) : []),
+    ...(canAdmin ? ([["fields", "Fields"], ["automation", "Automation"], ["forms", "Forms"]] as Array<[Tab, string]>) : []),
     ["archive", "Archive"],
     ["activity", "Activity"],
   ];
@@ -47,6 +47,7 @@ export default function BoardMenu({ onClose }: { onClose: () => void }) {
           {tab === "share" && <ShareTab canAdmin={canAdmin} />}
           {tab === "fields" && canAdmin && <FieldsTab />}
           {tab === "automation" && canAdmin && <AutomationTab />}
+          {tab === "forms" && canAdmin && <FormsTab />}
           {tab === "archive" && <ArchiveTab />}
           {tab === "activity" && <ActivityTab />}
         </div>
@@ -660,6 +661,153 @@ function RuleBuilder({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
           }}
         >
           Save rule
+        </button>
+        <button className="btn-ghost !py-1 text-xs" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- forms */
+
+const FORM_FIELD_TYPES = ["text", "textarea", "email", "number", "date", "select"] as const;
+
+function FormsTab() {
+  const s = useBoard();
+  const qc = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["forms", s.boardId],
+    queryFn: () => api.get<{ forms: FormDef[] }>(`/api/boards/${s.boardId}/forms`),
+  });
+  const refetch = () => qc.invalidateQueries({ queryKey: ["forms", s.boardId] });
+  const [building, setBuilding] = useState(false);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs opacity-60">
+        Public forms — anyone with the link can submit, and each submission lands as a
+        card. Perfect for enquiries and intake. Answers go into the card description.
+      </p>
+      {(data?.forms ?? []).map((f) => (
+        <div key={f.id} className="rounded-md border border-rule p-2 text-sm dark:border-ink-3">
+          <div className="flex items-center gap-2">
+            <span className="flex-1 font-medium">{f.title}</span>
+            <span className="text-xs opacity-50">→ {s.lists.find((l) => l.id === f.listId)?.name ?? "?"}</span>
+            <button
+              title={f.enabled ? "Close form" : "Open form"}
+              className={`h-4 w-7 rounded-full transition-colors ${f.enabled ? "bg-[#519839]" : "bg-ink/20 dark:bg-paper/20"}`}
+              onClick={async () => { await api.patch(`/api/forms/${f.id}`, { enabled: !f.enabled }); refetch(); }}
+            >
+              <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${f.enabled ? "translate-x-3.5" : "translate-x-0.5"}`} />
+            </button>
+            <button
+              className="btn-ghost !px-1.5 !py-0.5 text-xs text-[#b03a37]"
+              onClick={async () => {
+                if (!confirm(`Delete form "${f.title}"?`)) return;
+                await api.del(`/api/forms/${f.id}`);
+                refetch();
+              }}
+            >
+              ×
+            </button>
+          </div>
+          <div className="mt-1.5 flex gap-1">
+            <input
+              className="input !py-1 text-xs"
+              readOnly
+              value={`${location.origin}/form/${f.token}`}
+              onFocus={(e) => e.target.select()}
+            />
+            <button
+              className="btn-ghost shrink-0 !py-1 text-xs"
+              onClick={() => navigator.clipboard.writeText(`${location.origin}/form/${f.token}`)}
+            >
+              Copy
+            </button>
+          </div>
+          <p className="mt-1 text-xs opacity-50">{f.fields.map((x) => x.label).join(" · ")}</p>
+        </div>
+      ))}
+      {building ? (
+        <FormBuilder onDone={() => { setBuilding(false); refetch(); }} onCancel={() => setBuilding(false)} />
+      ) : (
+        <button className="btn-accent !py-1 text-xs" onClick={() => setBuilding(true)}>+ New form</button>
+      )}
+    </div>
+  );
+}
+
+function FormBuilder({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
+  const s = useBoard();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [listId, setListId] = useState(s.lists.find((l) => !l.archived)?.id ?? "");
+  const [fields, setFields] = useState<Array<{ id: string; label: string; type: string; required: boolean; options?: string[] }>>([
+    { id: "f1", label: "Name", type: "text", required: true },
+  ]);
+
+  const setField = (i: number, patch: Partial<(typeof fields)[number]>) =>
+    setFields(fields.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+
+  return (
+    <div className="space-y-2 rounded-md border border-accent/60 p-2">
+      <input className="input !py-1 text-sm" placeholder="Form title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} />
+      <textarea className="input !py-1 text-xs" rows={2} placeholder="Intro text (optional)" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />
+      <div className="flex items-center gap-1 text-xs">
+        <span className="opacity-60">Submissions land in</span>
+        <select className="input !w-auto !py-1 text-xs" value={listId} onChange={(e) => setListId(e.target.value)}>
+          {s.lists.filter((l) => !l.archived).map((l) => (
+            <option key={l.id} value={l.id}>{l.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <p className="text-[11px] font-medium uppercase tracking-wide opacity-50">
+        Fields <span className="normal-case">(first answer becomes the card title)</span>
+      </p>
+      {fields.map((f, i) => (
+        <div key={f.id} className="space-y-1 rounded border border-rule p-1.5 dark:border-ink-3">
+          <div className="flex gap-1">
+            <input className="input !py-0.5 text-xs" placeholder="Question" value={f.label} onChange={(e) => setField(i, { label: e.target.value })} maxLength={120} />
+            <select className="input !w-auto !py-0.5 text-xs" value={f.type} onChange={(e) => setField(i, { type: e.target.value })}>
+              {FORM_FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <label className="flex items-center gap-1 text-[11px]">
+              <input type="checkbox" checked={f.required} onChange={(e) => setField(i, { required: e.target.checked })} />
+              req
+            </label>
+            <button className="btn-ghost !px-1 !py-0 text-xs" onClick={() => setFields(fields.filter((_, j) => j !== i))} disabled={fields.length === 1}>×</button>
+          </div>
+          {f.type === "select" && (
+            <input
+              className="input !py-0.5 text-xs"
+              placeholder="Options, comma-separated"
+              value={(f.options ?? []).join(", ")}
+              onChange={(e) => setField(i, { options: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
+            />
+          )}
+        </div>
+      ))}
+      <button
+        className="btn-ghost !py-1 text-xs"
+        onClick={() => setFields([...fields, { id: `f${fields.length + 1}-${fields.length}`, label: "", type: "text", required: false }])}
+        disabled={fields.length >= 20}
+      >
+        + add field
+      </button>
+
+      <div className="flex gap-1">
+        <button
+          className="btn-accent !py-1 text-xs"
+          disabled={!title.trim() || !listId || fields.some((f) => !f.label.trim())}
+          onClick={async () => {
+            await api.post(`/api/boards/${s.boardId}/forms`, {
+              listId, title: title.trim(), description, fields,
+            });
+            onDone();
+          }}
+        >
+          Create form
         </button>
         <button className="btn-ghost !py-1 text-xs" onClick={onCancel}>Cancel</button>
       </div>
