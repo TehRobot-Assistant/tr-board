@@ -1,8 +1,10 @@
 # TR Board
 
 Self-hosted Trello — TR Studios. Multi-user with team-gated visibility, live
-sync, and Trello's paid features free: custom fields, Calendar/Timeline/Table
-views, unmetered Butler-style automation, admin controls, uncapped attachments.
+sync, and Trello's paid features free: custom fields, Calendar/Timeline/Table/
+Dashboard views, unmetered Butler-style automation, admin controls, uncapped
+attachments, global search, "My Work", card dependencies, public intake forms,
+board export/copy, link sharing, card mirroring, and inline card previews.
 
 Scope/design brief: `SCOPE.md`.
 
@@ -59,6 +61,10 @@ npm run dev:web      # Vite on :8840, proxies /api + /socket.io → 8841
 Schema changes: edit `server/src/db/schema.ts`, then
 `cd server && npx drizzle-kit generate` (writes SQL into `server/drizzle/`,
 applied automatically on next boot).
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
 
 ## Layout
 
