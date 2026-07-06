@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { useBoard } from "../stores/board";
+import { matchesFilter, useBoard } from "../stores/board";
 
 const DAY = 86400_000;
 const PX_PER_DAY = 34;
@@ -9,7 +9,9 @@ const PX_PER_DAY = 34;
 export default function TimelineView() {
   const s = useBoard();
 
-  const dated = s.cards.filter((c) => !c.archived && (c.dueAt || c.startAt));
+  const dated = s.cards.filter(
+    (c) => !c.archived && (c.dueAt || c.startAt) && matchesFilter(c, s.filter),
+  );
 
   const range = useMemo(() => {
     if (!dated.length) return null;

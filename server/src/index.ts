@@ -16,6 +16,8 @@ import { cardRoutes } from "./routes/cards.js";
 import { cardDetailRoutes } from "./routes/cardDetail.js";
 import { phase1Routes } from "./routes/phase1.js";
 import { adminRoutes } from "./routes/admin.js";
+import { boardToolsRoutes } from "./routes/boardTools.js";
+import { publicRoutes } from "./routes/public.js";
 
 // apply SQL migrations on boot (idempotent — makes `docker compose up` zero-step)
 if (fs.existsSync(new URL("../drizzle", import.meta.url))) {
@@ -57,8 +59,9 @@ app.addHook("preHandler", async (req, reply) => {
   return reply.code(403).send({ error: "cross-site request blocked" });
 });
 
-// public auth endpoints
+// public endpoints: auth + link-shared board snapshots
 await app.register(authRoutes);
+await app.register(publicRoutes);
 
 // everything else under /api requires a session
 await app.register(async (secured) => {
@@ -70,6 +73,7 @@ await app.register(async (secured) => {
   await secured.register(cardDetailRoutes);
   await secured.register(phase1Routes);
   await secured.register(adminRoutes);
+  await secured.register(boardToolsRoutes);
 });
 
 app.get("/api/health", async () => ({ ok: true, name: "TR Board" }));

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
-import { useBoard } from "../stores/board";
+import { matchesFilter, useBoard } from "../stores/board";
 import type { Card } from "../lib/types";
 import { Avatar } from "./Chrome";
 import { FieldValueInline, dueTone, fmtDue } from "./CardChip";
@@ -14,16 +14,11 @@ export default function TableView() {
   const canWrite = !!s.myAccess?.canWrite;
   const [sortKey, setSortKey] = useState<SortKey>("list");
   const [asc, setAsc] = useState(true);
-  const [filter, setFilter] = useState("");
 
   const listName = (id: string) => s.lists.find((l) => l.id === id)?.name ?? "?";
 
   const rows = useMemo(() => {
-    let cards = s.cards.filter((c) => !c.archived);
-    if (filter.trim()) {
-      const q = filter.toLowerCase();
-      cards = cards.filter((c) => c.title.toLowerCase().includes(q));
-    }
+    const cards = s.cards.filter((c) => !c.archived && matchesFilter(c, s.filter));
     const cmp: Record<SortKey, (a: Card, b: Card) => number> = {
       title: (a, b) => a.title.localeCompare(b.title),
       list: (a, b) => listName(a.listId).localeCompare(listName(b.listId)) || (a.rank < b.rank ? -1 : 1),
@@ -33,7 +28,7 @@ export default function TableView() {
     const sorted = [...cards].sort(cmp[sortKey]);
     return asc ? sorted : sorted.reverse();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.cards, s.lists, sortKey, asc, filter]);
+  }, [s.cards, s.lists, sortKey, asc, s.filter]);
 
   const TH = ({ label, k }: { label: string; k?: SortKey }) => (
     <th
@@ -48,13 +43,7 @@ export default function TableView() {
     <div className="p-3">
       <div className="overflow-x-auto rounded-card bg-paper/97 shadow-card dark:bg-ink-2/97">
         <div className="flex items-center gap-2 border-b border-rule p-2 dark:border-ink-3">
-          <input
-            className="input !w-64 !py-1 text-sm"
-            placeholder="Filter cards…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-          <span className="text-xs opacity-50">{rows.length} cards</span>
+          <span className="text-xs opacity-50">{rows.length} cards — click a column to sort, double-click a title to edit inline</span>
         </div>
         <table className="w-full min-w-[720px] text-sm">
           <thead className="border-b border-rule dark:border-ink-3">

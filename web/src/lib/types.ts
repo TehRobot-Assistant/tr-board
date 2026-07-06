@@ -43,6 +43,7 @@ export type Board = {
   name: string;
   background: string;
   visibility: Visibility;
+  shareToken: string | null;
   archived: boolean;
   starred?: boolean;
 };
@@ -70,10 +71,24 @@ export type CardBadges = {
   checklist: { total: number; done: number } | null;
 };
 
+export type MirrorSnapshot = {
+  sourceCardId: string;
+  sourceBoardId: string;
+  boardName: string;
+  title: string;
+  dueAt: string | null;
+  dueComplete: boolean;
+  archived: boolean;
+  labels: Array<{ name: string; color: string }>;
+} | null;
+
 export type Card = {
   id: string;
   boardId: string;
   listId: string;
+  mirrorOfCardId?: string | null;
+  /** present (possibly null = broken) when this card is a mirror */
+  mirror?: MirrorSnapshot;
   title: string;
   description: string;
   rank: string;

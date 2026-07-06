@@ -143,6 +143,8 @@ export const boards = pgTable(
     /** background: a colour token or css gradient */
     background: text("background").notNull().default("navy"),
     visibility: boardVisibility("visibility").notNull().default("workspace"),
+    /** set → anyone with /share/<token> gets a read-only snapshot */
+    shareToken: text("share_token").unique(),
     archived: boolean("archived").notNull().default(false),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -217,6 +219,8 @@ export const cards = pgTable(
     /** cover: colour token, or attachment id rendered as image cover */
     coverColor: text("cover_color"),
     coverAttachmentId: uuid("cover_attachment_id"),
+    /** mirror card: renders the source card's face, opens the source */
+    mirrorOfCardId: uuid("mirror_of_card_id"),
     archived: boolean("archived").notNull().default(false),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

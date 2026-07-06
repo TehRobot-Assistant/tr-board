@@ -8,6 +8,8 @@ import { logActivity } from "../lib/activity.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 import { rankBetween } from "./lists.js";
 import { dispatchAutomation } from "../automation/engine.js";
+import { deleteMirrorsOf, mirrorSnapshots, propagateMirror } from "../lib/mirror.js";
+import { boardAccess } from "../lib/perms.js";
 
 export async function loadCard(id: string) {
   if (!uuidSchema.safeParse(id).success) return null;
@@ -171,6 +173,9 @@ export async function cardRoutes(app: FastifyInstance) {
       .where(eq(schema.cards.id, id))
       .returning();
     emitBoard(card.boardId, "card.updated", { card: updated }, originSocket(req));
+    if (rest.title !== undefined || rest.dueAt !== undefined || rest.dueComplete !== undefined || rest.archived !== undefined) {
+      propagateMirror(id).catch(() => {});
+    }
 
     if (movedFrom) {
       const names = await db
@@ -212,7 +217,61 @@ export async function cardRoutes(app: FastifyInstance) {
     await db.delete(schema.cards).where(eq(schema.cards.id, id));
     emitBoard(card.boardId, "card.deleted", { cardId: id, listId: card.listId }, originSocket(req));
     logActivity({ boardId: card.boardId, userId: req.user.id, type: "card.deleted", data: { title: card.title } });
+    deleteMirrorsOf(id).catch(() => {});
     return { ok: true };
+  });
+
+  /**
+   * Mirror this card onto another board's list. Needs read on the source and
+   * write on the target; the mirror renders the source's face, live.
+   */
+  app.post("/api/cards/:id/mirror", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(z.object({ listId: uuidSchema }), req, reply);
+    if (!body) return;
+    const source = await loadCard(id);
+    if (!source) return reply.code(404).send({ error: "not found" });
+    if (!(await requireBoard(req, reply, source.boardId, "read"))) return;
+    if (source.mirrorOfCardId) return reply.code(400).send({ error: "cannot mirror a mirror" });
+
+    const [targetList] = await db.select().from(schema.lists).where(eq(schema.lists.id, body.listId));
+    if (!targetList) return reply.code(404).send({ error: "target list not found" });
+    const target = await boardAccess(req.user.id, targetList.boardId, { isAdmin: req.user.isAdmin });
+    if (!target?.canWrite) return reply.code(403).send({ error: "no write access to the target board" });
+    if (targetList.boardId === source.boardId) {
+      return reply.code(400).send({ error: "mirror onto a different board — same-board copies don't need a mirror" });
+    }
+
+    const [last] = await db
+      .select({ rank: schema.cards.rank })
+      .from(schema.cards)
+      .where(eq(schema.cards.listId, targetList.id))
+      .orderBy(desc(schema.cards.rank))
+      .limit(1);
+    const [mirror] = await db
+      .insert(schema.cards)
+      .values({
+        boardId: targetList.boardId,
+        listId: targetList.id,
+        title: source.title, // fallback face if the source ever vanishes
+        rank: after(last?.rank ?? null),
+        mirrorOfCardId: source.id,
+        createdBy: req.user.id,
+      })
+      .returning();
+    const snap = (await mirrorSnapshots([source.id])).get(source.id);
+    const payload = {
+      ...mirror,
+      labelIds: [], memberIds: [], fieldValues: {},
+      badges: { comments: 0, attachments: 0, checklist: null },
+      mirror: snap,
+    };
+    emitBoard(targetList.boardId, "card.created", { card: payload }, originSocket(req));
+    logActivity({
+      boardId: targetList.boardId, cardId: mirror.id, userId: req.user.id,
+      type: "card.mirrored", data: { title: source.title, fromBoard: snap?.boardName },
+    });
+    return { card: payload };
   });
 
   /* --------------------------------------------------- members on a card */
@@ -263,6 +322,7 @@ export async function cardRoutes(app: FastifyInstance) {
     await db.insert(schema.cardLabels).values({ cardId: id, labelId }).onConflictDoNothing();
     emitBoard(card.boardId, "card.labelAdded", { cardId: id, labelId }, originSocket(req));
     dispatchAutomation(card.boardId, { type: "label_added", cardId: id, listId: card.listId, labelId }, req.user.id);
+    propagateMirror(id).catch(() => {});
     return { ok: true };
   });
 
@@ -276,6 +336,7 @@ export async function cardRoutes(app: FastifyInstance) {
       .delete(schema.cardLabels)
       .where(and(eq(schema.cardLabels.cardId, id), eq(schema.cardLabels.labelId, labelId)));
     emitBoard(card.boardId, "card.labelRemoved", { cardId: id, labelId }, originSocket(req));
+    propagateMirror(id).catch(() => {});
     return { ok: true };
   });
 }

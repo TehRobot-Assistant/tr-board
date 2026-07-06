@@ -82,6 +82,21 @@ function AboutTab({ canAdmin }: { canAdmin: boolean }) {
           </div>
         </div>
       )}
+      <div>
+        <h3 className="text-xs font-medium uppercase tracking-wide opacity-50">Tools</h3>
+        <div className="mt-2 space-y-2">
+          {canAdmin && (
+            <a
+              className="btn-ghost w-full justify-start bg-ink/5 text-sm dark:bg-paper/10"
+              href={`/api/boards/${board.id}/export`}
+              download
+            >
+              ⤓ Export board as JSON
+            </a>
+          )}
+          <CopyBoardTool />
+        </div>
+      </div>
       {canAdmin && (
         <div>
           <h3 className="text-xs font-medium uppercase tracking-wide opacity-50">Danger zone</h3>
@@ -109,6 +124,54 @@ function AboutTab({ canAdmin }: { canAdmin: boolean }) {
         </div>
       )}
       {!canAdmin && <p className="text-sm opacity-60">Board settings are managed by board admins.</p>}
+    </div>
+  );
+}
+
+function CopyBoardTool() {
+  const s = useBoard();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(`${s.board?.name ?? "Board"} (copy)`);
+  const [includeCards, setIncludeCards] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  if (!open) {
+    return (
+      <button className="btn-ghost w-full justify-start bg-ink/5 text-sm dark:bg-paper/10" onClick={() => setOpen(true)}>
+        ⧉ Copy board / save as template
+      </button>
+    );
+  }
+  return (
+    <div className="rounded-md border border-rule p-2 dark:border-ink-3">
+      <input className="input !py-1 text-sm" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
+      <label className="mt-2 flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={includeCards} onChange={(e) => setIncludeCards(e.target.checked)} />
+        Include cards (off = structure only: lists, labels, fields, automation)
+      </label>
+      <div className="mt-2 flex gap-1">
+        <button
+          className="btn-accent !py-1 text-xs"
+          disabled={busy || !name.trim()}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const { board } = await api.post<{ board: { id: string } }>(`/api/boards/${s.boardId}/copy`, {
+                name: name.trim(), includeCards,
+              });
+              location.href = `/b/${board.id}`;
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Copying…" : "Copy"}
+        </button>
+        <button className="btn-ghost !py-1 text-xs" onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+      <p className="mt-1.5 text-[11px] leading-snug opacity-50">
+        Copies start private — open them up from Sharing when ready.
+      </p>
     </div>
   );
 }
@@ -179,6 +242,46 @@ function ShareTab({ canAdmin }: { canAdmin: boolean }) {
               <p className="text-xs opacity-60">No teams in this workspace yet — create them from the workspace page.</p>
             )}
           </div>
+        </div>
+      )}
+
+      {canAdmin && (
+        <div>
+          <h3 className="text-xs font-medium uppercase tracking-wide opacity-50">Public link</h3>
+          <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={!!board.shareToken}
+              onChange={async (e) => {
+                const { shareToken } = await api.post<{ shareToken: string | null }>(
+                  `/api/boards/${board.id}/share-link`,
+                  { enabled: e.target.checked },
+                );
+                useBoard.setState((st) => ({ board: st.board ? { ...st.board, shareToken } : st.board }));
+              }}
+            />
+            Anyone with the link can view (read-only)
+          </label>
+          {board.shareToken && (
+            <div className="mt-1.5 flex gap-1">
+              <input
+                className="input !py-1 text-xs"
+                readOnly
+                value={`${location.origin}/share/${board.shareToken}`}
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                className="btn-ghost shrink-0 !py-1 text-xs"
+                onClick={() => navigator.clipboard.writeText(`${location.origin}/share/${board.shareToken}`)}
+              >
+                Copy
+              </button>
+            </div>
+          )}
+          <p className="mt-1 text-[11px] leading-snug opacity-50">
+            Snapshot view: titles, lists, labels and due dates — no members, comments
+            or attachments. Untick to revoke (the old link dies instantly).
+          </p>
         </div>
       )}
 

@@ -22,6 +22,9 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
   const members = useBoard((s) => s.members);
   const defs = useBoard((s) => s.customFieldDefs);
 
+  // mirrors render the SOURCE card's face and link to the source
+  if (card.mirrorOfCardId) return <MirrorChip card={card} overlay={overlay} />;
+
   const cardLabels = labels.filter((l) => card.labelIds.includes(l.id));
   const cardMembers = members.filter((m) => card.memberIds.includes(m.id));
   const frontFields = defs.filter((d) => d.showOnFront && card.fieldValues[d.id] !== undefined);
@@ -103,6 +106,55 @@ export default function CardChip({ card, overlay = false }: { card: Card; overla
   if (overlay) return body;
   return (
     <Link to={`/b/${card.boardId}/c/${card.id}`} draggable={false} className="block">
+      {body}
+    </Link>
+  );
+}
+
+function MirrorChip({ card, overlay }: { card: Card; overlay: boolean }) {
+  const m = card.mirror ?? null;
+  const face = m ?? {
+    title: card.title, dueAt: null, dueComplete: false, archived: false,
+    labels: [], boardName: "deleted board", sourceBoardId: "", sourceCardId: "",
+  };
+  const dueChip = face.dueAt
+    ? dueTone({ dueAt: face.dueAt, dueComplete: face.dueComplete } as Card)
+    : "";
+
+  const body = (
+    <div
+      className={`rounded-card border-l-4 border-[#89609e] bg-white p-2.5 text-sm shadow-card dark:bg-ink-3 ${
+        overlay ? "rotate-2 shadow-drag" : "hover:ring-2 hover:ring-accent"
+      } ${m?.archived || !m ? "opacity-60" : ""}`}
+    >
+      {face.labels.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1">
+          {face.labels.map((l, i) => (
+            <span key={i} title={l.name} className="h-2 min-w-8 rounded-full" style={{ background: l.color }} />
+          ))}
+        </div>
+      )}
+      <p className="leading-snug">{face.title}</p>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] opacity-90">
+        <span className="rounded bg-[#89609e]/15 px-1.5 py-0.5 font-medium text-[#89609e] dark:bg-[#89609e]/30 dark:text-[#c9a6e0]">
+          ⇄ {m ? m.boardName : "source deleted"}
+        </span>
+        {face.dueAt && (
+          <span className={`rounded px-1.5 py-0.5 font-medium ${dueChip}`}>⏱ {fmtDue(face.dueAt)}</span>
+        )}
+        {m?.archived && <span className="rounded bg-ink/10 px-1.5 py-0.5 dark:bg-paper/15">archived</span>}
+      </div>
+    </div>
+  );
+
+  if (overlay) return body;
+  return (
+    <Link
+      to={m ? `/b/${m.sourceBoardId}/c/${m.sourceCardId}` : `/b/${card.boardId}/c/${card.id}`}
+      draggable={false}
+      className="block"
+      title={m ? `Mirror of a card on "${m.boardName}" — opens the source` : "Source card was deleted"}
+    >
       {body}
     </Link>
   );

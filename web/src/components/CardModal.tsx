@@ -230,6 +230,7 @@ export default function CardModal({ cardId, onClose }: { cardId: string; onClose
             <AddChecklistButton cardId={cardId} onAdded={refetch} />
             <AttachButton cardId={cardId} onUploaded={refetch} />
             <CoverButton card={card} onSave={patchCard} />
+            {!card.mirrorOfCardId && <MirrorButton cardId={cardId} />}
             <div className="mt-3 border-t border-rule pt-3 dark:border-ink-3">
               <button
                 className="btn-ghost w-full justify-start text-sm"
@@ -706,6 +707,83 @@ function CoverButton({ card, onSave }: { card: { coverColor: string | null }; on
           </div>
           <button className="btn-ghost mt-2 w-full !py-1 text-xs" onClick={() => { onSave({ coverColor: null, coverAttachmentId: null }); close(); }}>
             Remove cover
+          </button>
+        </>
+      )}
+    </SidebarPop>
+  );
+}
+
+/** mirror this card onto another board (Trello Standard+, free here) */
+function MirrorButton({ cardId }: { cardId: string }) {
+  const s = useBoard();
+  const [boards, setBoards] = useState<Array<{ id: string; name: string }>>([]);
+  const [lists, setLists] = useState<Array<{ id: string; name: string }>>([]);
+  const [boardId, setBoardId] = useState("");
+  const [listId, setListId] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  return (
+    <SidebarPop label="⇄ Mirror">
+      {(close) => (
+        <>
+          <p className="mb-2 text-[11px] leading-snug opacity-60">
+            Put a live read-only copy of this card on another board. It follows the
+            source's title, due date and labels.
+          </p>
+          <select
+            className="input !py-1 text-sm"
+            value={boardId}
+            onFocus={async () => {
+              if (boards.length || !s.board) return;
+              const ws = await api.get<{ boards: Array<{ id: string; name: string; archived: boolean }> }>(
+                `/api/workspaces/${s.board.workspaceId}`,
+              );
+              setBoards(ws.boards.filter((b) => !b.archived && b.id !== s.boardId));
+            }}
+            onChange={async (e) => {
+              setBoardId(e.target.value);
+              setListId("");
+              setLists([]);
+              setMsg(null);
+              if (!e.target.value) return;
+              try {
+                const full = await api.get<{ lists: Array<{ id: string; name: string; archived: boolean }> }>(
+                  `/api/boards/${e.target.value}/full`,
+                );
+                setLists(full.lists.filter((l) => !l.archived));
+              } catch {
+                setMsg("You can't access that board.");
+              }
+            }}
+          >
+            <option value="">Target board…</option>
+            {boards.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+          {lists.length > 0 && (
+            <select className="input mt-1.5 !py-1 text-sm" value={listId} onChange={(e) => setListId(e.target.value)}>
+              <option value="">Target list…</option>
+              {lists.map((l) => (
+                <option key={l.id} value={l.id}>{l.name}</option>
+              ))}
+            </select>
+          )}
+          {msg && <p className="mt-1 text-xs text-[#b03a37]">{msg}</p>}
+          <button
+            className="btn-accent mt-2 w-full !py-1 text-xs"
+            disabled={!listId}
+            onClick={async () => {
+              try {
+                await api.post(`/api/cards/${cardId}/mirror`, { listId });
+                close();
+              } catch (err: any) {
+                setMsg(err.message);
+              }
+            }}
+          >
+            Create mirror
           </button>
         </>
       )}

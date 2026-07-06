@@ -11,8 +11,55 @@ import { api } from "../lib/api";
 import { between } from "../lib/rank";
 import { getSocket } from "../lib/socket";
 
+export type BoardFilter = {
+  text: string;
+  labelIds: string[];
+  memberIds: string[];
+  due: "any" | "overdue" | "today" | "week" | "none" | "done";
+};
+
+export const EMPTY_FILTER: BoardFilter = { text: "", labelIds: [], memberIds: [], due: "any" };
+
+export function filterActive(f: BoardFilter): number {
+  return (
+    (f.text.trim() ? 1 : 0) + f.labelIds.length + f.memberIds.length + (f.due !== "any" ? 1 : 0)
+  );
+}
+
+export function matchesFilter(c: Card, f: BoardFilter): boolean {
+  if (f.text.trim() && !c.title.toLowerCase().includes(f.text.trim().toLowerCase())) return false;
+  if (f.labelIds.length && !f.labelIds.some((l) => c.labelIds.includes(l))) return false;
+  if (f.memberIds.length && !f.memberIds.some((m) => c.memberIds.includes(m))) return false;
+  switch (f.due) {
+    case "overdue":
+      if (!c.dueAt || c.dueComplete || Date.parse(c.dueAt) >= Date.now()) return false;
+      break;
+    case "today": {
+      if (!c.dueAt) return false;
+      const d = new Date(c.dueAt);
+      const now = new Date();
+      if (d.toDateString() !== now.toDateString()) return false;
+      break;
+    }
+    case "week":
+      if (!c.dueAt) return false;
+      if (Date.parse(c.dueAt) > Date.now() + 7 * 86400_000 || Date.parse(c.dueAt) < Date.now() - 86400_000) return false;
+      break;
+    case "none":
+      if (c.dueAt) return false;
+      break;
+    case "done":
+      if (!c.dueComplete) return false;
+      break;
+  }
+  return true;
+}
+
 type BoardState = {
   boardId: string | null;
+  filter: BoardFilter;
+  setFilter(patch: Partial<BoardFilter>): void;
+  clearFilter(): void;
   loading: boolean;
   error: string | null;
   board: Board | null;
@@ -150,6 +197,12 @@ export const useBoard = create<BoardState>((set, get) => {
     })),
   );
 
+  on("mirror.updated", ({ cardId, mirror }) =>
+    set((s) => ({
+      cards: s.cards.map((c) => (c.id === cardId ? { ...c, mirror } : c)),
+    })),
+  );
+
   on("label.created", ({ label }) =>
     set((s) => (label.boardId === s.boardId ? { labels: [...s.labels, label] } : s)),
   );
@@ -209,6 +262,13 @@ export const useBoard = create<BoardState>((set, get) => {
   /* ------------------------------------------------------------- store */
   return {
     boardId: null,
+    filter: EMPTY_FILTER,
+    setFilter(patch) {
+      set((s) => ({ filter: { ...s.filter, ...patch } }));
+    },
+    clearFilter() {
+      set({ filter: EMPTY_FILTER });
+    },
     loading: false,
     error: null,
     board: null,
@@ -245,7 +305,7 @@ export const useBoard = create<BoardState>((set, get) => {
       const id = get().boardId;
       if (id) getSocket().emit("board:leave", id);
       set({
-        boardId: null, board: null, myAccess: null, error: null,
+        boardId: null, board: null, myAccess: null, error: null, filter: EMPTY_FILTER,
         lists: [], cards: [], labels: [], members: [], teamIds: [], customFieldDefs: [],
       });
     },

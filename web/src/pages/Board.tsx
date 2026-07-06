@@ -10,6 +10,8 @@ import CalendarView from "../components/CalendarView";
 import TimelineView from "../components/TimelineView";
 import BoardMenu from "../components/BoardMenu";
 import CardModal from "../components/CardModal";
+import FilterButton from "../components/FilterBar";
+import DashboardView from "../components/DashboardView";
 
 const BG: Record<string, string> = {
   navy: "bg-board-navy", sky: "bg-board-sky", teal: "bg-board-teal",
@@ -17,7 +19,7 @@ const BG: Record<string, string> = {
   plum: "bg-board-plum", slate: "bg-board-slate", ink: "bg-board-ink",
 };
 
-type ViewKind = "board" | "table" | "calendar" | "timeline";
+type ViewKind = "board" | "table" | "calendar" | "timeline" | "dashboard";
 
 export default function BoardPage() {
   const { boardId, cardId } = useParams<{ boardId: string; cardId?: string }>();
@@ -77,7 +79,7 @@ export default function BoardPage() {
         </span>
 
         <nav className="ml-3 flex gap-0.5 rounded-md bg-black/20 p-0.5">
-          {(["board", "table", "calendar", "timeline"] as const).map((v) => (
+          {(["board", "table", "calendar", "timeline", "dashboard"] as const).map((v) => (
             <button
               key={v}
               className={`rounded px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
@@ -90,7 +92,10 @@ export default function BoardPage() {
           ))}
         </nav>
 
-        <div className="ml-auto flex items-center -space-x-1.5">
+        <div className="ml-auto">
+          <FilterButton />
+        </div>
+        <div className="flex items-center -space-x-1.5">
           {s.members.slice(0, 6).map((m) => (
             <Avatar key={m.id} name={m.name} color={m.avatarColor} size={26} title={`${m.name} (${m.role})`} />
           ))}
@@ -116,6 +121,7 @@ export default function BoardPage() {
         {view === "table" && <TableView />}
         {view === "calendar" && <CalendarView />}
         {view === "timeline" && <TimelineView />}
+        {view === "dashboard" && <DashboardView />}
       </div>
 
       {menuOpen && <BoardMenu onClose={() => setMenuOpen(false)} />}

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
-import { useBoard } from "../stores/board";
+import { matchesFilter, useBoard } from "../stores/board";
 import { dueTone } from "./CardChip";
 
 /** month calendar keyed on card due dates; drag a card to a day to re-due it */
@@ -34,14 +34,14 @@ export default function CalendarView() {
   const byDay = useMemo(() => {
     const m = new Map<string, typeof s.cards>();
     for (const c of s.cards) {
-      if (c.archived || !c.dueAt) continue;
+      if (c.archived || !c.dueAt || !matchesFilter(c, s.filter)) continue;
       const key = dayKey(new Date(c.dueAt));
       const arr = m.get(key) ?? [];
       arr.push(c);
       m.set(key, arr);
     }
     return m;
-  }, [s.cards]);
+  }, [s.cards, s.filter]);
 
   const today = dayKey(new Date());
 

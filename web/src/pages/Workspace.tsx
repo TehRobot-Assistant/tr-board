@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -93,6 +93,7 @@ export default function WorkspacePage() {
                 <BoardGrid boards={archived} dim />
               </>
             )}
+            <TrelloImport workspaceId={workspace.id} />
           </>
         )}
 
@@ -178,6 +179,55 @@ function CreateBoardTile({ workspaceId, onCreated }: { workspaceId: string; onCr
         <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
       </div>
     </form>
+  );
+}
+
+function TrelloImport({ workspaceId }: { workspaceId: string }) {
+  const nav = useNavigate();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="mt-8 border-t border-rule pt-4 dark:border-ink-3">
+      <button className="btn-ghost text-sm" onClick={() => inputRef.current?.click()} disabled={busy}>
+        ⤒ {busy ? "Importing…" : "Import a board from Trello (JSON export)"}
+      </button>
+      <p className="mt-1 text-xs opacity-50">
+        In Trello: board menu → Print, export and share → Export as JSON. Brings in lists,
+        cards, labels, checklists, due dates and comments. Imports arrive private.
+      </p>
+      {error && <p className="mt-1 text-sm text-[#b03a37]">{error}</p>}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          setBusy(true);
+          setError(null);
+          try {
+            const json = JSON.parse(await file.text());
+            const res = await fetch(`/api/workspaces/${workspaceId}/import/trello`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(json),
+              credentials: "same-origin",
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error ?? "import failed");
+            nav(`/b/${data.board.id}`);
+          } catch (err: any) {
+            setError(err.message === "Unexpected end of JSON input" ? "That file isn't valid JSON." : err.message);
+          } finally {
+            setBusy(false);
+            e.target.value = "";
+          }
+        }}
+      />
+    </div>
   );
 }
 

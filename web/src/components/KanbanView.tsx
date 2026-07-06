@@ -9,7 +9,7 @@ import {
   horizontalListSortingStrategy, verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useBoard } from "../stores/board";
+import { matchesFilter, useBoard } from "../stores/board";
 import type { Card, List } from "../lib/types";
 import CardChip from "./CardChip";
 
@@ -27,11 +27,11 @@ export default function KanbanView() {
     const m = new Map<string, Card[]>();
     for (const l of lists) m.set(l.id, []);
     for (const c of s.cards) {
-      if (c.archived) continue;
+      if (c.archived || !matchesFilter(c, s.filter)) continue;
       m.get(c.listId)?.push(c);
     }
     return m;
-  }, [lists, s.cards]);
+  }, [lists, s.cards, s.filter]);
 
   const findCard = (id: string) => s.cards.find((c) => c.id === id);
 

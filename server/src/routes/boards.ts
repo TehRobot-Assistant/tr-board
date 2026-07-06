@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
@@ -5,6 +6,7 @@ import { db, schema } from "../db/client.js";
 import { workspaceRoleOf } from "../lib/perms.js";
 import { emitBoard, kickFromBoard } from "../sockets/index.js";
 import { logActivity } from "../lib/activity.js";
+import { mirrorSnapshots } from "../lib/mirror.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 
 const BACKGROUNDS = [
@@ -124,6 +126,8 @@ export async function boardRoutes(app: FastifyInstance) {
     const comments = new Map(commentCounts.map((r) => [r.cardId, Number(r.n)]));
     const attach = new Map(attachCounts.map((r) => [r.cardId, Number(r.n)]));
     const checks = new Map(checkAgg.map((r) => [r.cardId, { total: Number(r.total), done: Number(r.done) }]));
+    const mirrorSources = cardRows.filter((c) => c.mirrorOfCardId).map((c) => c.mirrorOfCardId!);
+    const mirrors = await mirrorSnapshots(mirrorSources);
 
     return {
       board: access.board,
@@ -144,6 +148,7 @@ export async function boardRoutes(app: FastifyInstance) {
           attachments: attach.get(c.id) ?? 0,
           checklist: checks.get(c.id) ?? null,
         },
+        mirror: c.mirrorOfCardId ? mirrors.get(c.mirrorOfCardId) ?? null : undefined,
       })),
       labels: labelRows,
       members: memberRows,
@@ -293,6 +298,22 @@ export async function boardRoutes(app: FastifyInstance) {
     };
     emitBoard(id, "board.memberUpserted", { member }, originSocket(req));
     return { ok: true };
+  });
+
+  /** enable/rotate/disable the public share link (board admin) */
+  app.post("/api/boards/:id/share-link", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(z.object({ enabled: z.boolean() }), req, reply);
+    if (!body) return;
+    const access = await requireBoard(req, reply, id, "admin");
+    if (!access) return;
+    const shareToken = body.enabled ? crypto.randomBytes(16).toString("hex") : null;
+    await db.update(schema.boards).set({ shareToken }).where(eq(schema.boards.id, id));
+    logActivity({
+      boardId: id, userId: req.user.id,
+      type: body.enabled ? "board.shareEnabled" : "board.shareDisabled", data: {},
+    });
+    return { shareToken };
   });
 
   app.put("/api/boards/:id/star", async (req, reply) => {
