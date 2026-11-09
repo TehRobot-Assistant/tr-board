@@ -12,11 +12,19 @@ import path from "node:path";
  *   "a,b/cidr,..."  trust these proxy addresses (proxy-addr syntax, so the
  *                   names loopback / linklocal / uniquelocal work too).
  */
-function parseTrustProxy(raw: string | undefined): boolean | number | string {
+type TrustProxy = boolean | string | ((addr: string, hop: number) => boolean);
+
+function parseTrustProxy(raw: string | undefined): TrustProxy {
   const v = raw?.trim() ?? "";
   if (!v || v === "false" || v === "0") return false;
   if (v === "true") return true;
-  if (/^\d+$/.test(v)) return Number(v);
+  // A hop count ("1" = trust exactly the nearest proxy). Fastify >= 5.12's types
+  // no longer take a bare number, so express it as the equivalent proxy-addr
+  // predicate: hop 0 is the socket peer, trusted while hop < n.
+  if (/^\d+$/.test(v)) {
+    const n = Number(v);
+    return (_addr: string, hop: number) => hop < n;
+  }
   return v;
 }
 
