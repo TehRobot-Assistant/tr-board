@@ -2,12 +2,20 @@
   "name": "tr-board",
   "private": true,
   "version": "1.0.0",
-  "description": "TR Board — self-hosted Trello with the paid features free. TR Studios.",
-  "workspaces": ["server", "web"],
+  "description": "TR Board \u2014 self-hosted Trello with the paid features free. TR Studios.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev:server": "npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w web && npm run build -w server",
     "db:push": "npm run db:push -w server"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.12"
+    }
   }
 }
