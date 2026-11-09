@@ -63,6 +63,8 @@ type BoardState = {
   loading: boolean;
   error: string | null;
   board: Board | null;
+  /** whether I starred this board */
+  starred: boolean;
   myAccess: MyAccess | null;
   lists: List[];
   cards: Card[];
@@ -73,6 +75,8 @@ type BoardState = {
   links: CardLink[];
 
   load(boardId: string): Promise<void>;
+  /** re-join the room + refetch without a loading flash (reconnect / kick) */
+  resync(): Promise<void>;
   clear(): void;
 
   // optimistic mutations (fire API, apply locally)
@@ -89,10 +93,80 @@ type BoardState = {
   restoreCards(cards: Card[]): void;
 };
 
-const sortRank = <T extends { rank: string }>(xs: T[]) =>
-  [...xs].sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0));
+/**
+ * Rank order with id as the tiebreaker (M9). Two concurrent drops into one gap
+ * can produce equal ranks; without a tiebreak each client (and the server)
+ * could show the pair in a different order. Plain string compare of lowercase
+ * uuids matches Postgres' uuid ordering, which the server uses too.
+ */
+export const sortRank = <T extends { rank: string; id?: string }>(xs: T[]) =>
+  [...xs].sort((a, b) =>
+    a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : (a.id ?? "") < (b.id ?? "") ? -1 : (a.id ?? "") > (b.id ?? "") ? 1 : 0,
+  );
+
+/**
+ * Socket events that bump a counter. They can't be replayed safely on top of
+ * a /full snapshot (the snapshot may already include them), so one arriving
+ * mid-fetch triggers a follow-up refetch instead (L6).
+ */
+const COUNTER_EVENTS = new Set([
+  "comment.created", "comment.deleted", "attachment.created", "attachment.deleted",
+  "checklistItem.created", "checklistItem.updated", "checklistItem.deleted",
+]);
 
 export const useBoard = create<BoardState>((set, get) => {
+  /*
+   * L6: events that arrive while /full is in flight used to be applied to the
+   * old state and then overwritten by the snapshot, which may predate them.
+   * While any fetch is in flight they're queued, then replayed (in order) on
+   * top of the snapshot. Replay is safe for set/merge/remove handlers (an
+   * event the snapshot already includes just re-applies the same value);
+   * counter bumps aren't, so those schedule one more fetch instead.
+   */
+  let inflight = 0;
+  let queued: Array<() => void> = [];
+  let counterMissed = false;
+
+  /** join the board room and (re)hydrate from /full; shared by load + resync */
+  const fetchBoard = async (boardId: string, followUp = false): Promise<void> => {
+    getSocket().emit("board:join", boardId);
+    inflight++;
+    let applied = false;
+    try {
+      const data = await api.get<BoardFull>(`/api/boards/${boardId}/full`);
+      if (get().boardId !== boardId) return; // navigated away mid-fetch
+      applied = true;
+      set({
+        loading: false,
+        error: null,
+        board: data.board,
+        starred: !!data.starred,
+        myAccess: data.myAccess,
+        lists: sortRank(data.lists),
+        cards: sortRank(data.cards),
+        labels: data.labels,
+        members: data.members,
+        teamIds: data.teamIds,
+        customFieldDefs: sortRank(data.customFieldDefs),
+        links: data.links ?? [],
+      });
+    } catch (err: any) {
+      if (get().boardId !== boardId) return;
+      set({ loading: false, error: err.message ?? "Failed to load board" });
+    } finally {
+      inflight--;
+      const replay = queued;
+      queued = [];
+      if (get().boardId === boardId) for (const fn of replay) fn();
+      if (applied && inflight === 0 && counterMissed && !followUp) {
+        counterMissed = false;
+        void fetchBoard(boardId, true);
+      } else if (inflight === 0) {
+        counterMissed = false;
+      }
+    }
+  };
+
   /* ----------------------------------------------------- socket wiring */
   const socket = getSocket();
   const on = (event: string, fn: (payload: any) => void) => {
@@ -100,6 +174,11 @@ export const useBoard = create<BoardState>((set, get) => {
       // only apply events for the board we're viewing
       const s = get();
       if (!s.boardId) return;
+      if (inflight > 0) {
+        if (COUNTER_EVENTS.has(event)) counterMissed = true;
+        else queued.push(() => fn(payload));
+        return;
+      }
       fn(payload);
     });
   };
@@ -108,16 +187,52 @@ export const useBoard = create<BoardState>((set, get) => {
   on("board.deleted", ({ boardId }) => {
     if (boardId === get().boardId) set({ error: "This board was deleted." });
   });
-  on("board.kicked", ({ boardId }) => {
-    if (boardId === get().boardId) set({ error: "Your access to this board changed." });
+  // Server emits "board:kicked" (colon) when access changes; this listened for
+  // "board.kicked" and so never fired. Resync instead of a dead-end error: the
+  // re-join re-checks access, so someone who still has access (e.g. after a
+  // visibility change) just carries on, and someone who lost it gets the 404.
+  socket.on("board:kicked", ({ boardId }: { boardId?: string }) => {
+    if (boardId && boardId === get().boardId) void get().resync();
   });
-  on("board.memberUpserted", ({ member }) =>
-    set((s) => ({
-      members: [...s.members.filter((m) => m.id !== member.id), member],
-    })),
+
+  // H4: Socket.IO rooms belong to one connection. After any reconnect (server
+  // restart, Wi-Fi drop, laptop sleep, re-auth) the new connection is in no
+  // board room, so live updates silently stopped. Re-join and refetch /full so
+  // events missed while disconnected aren't lost. Skips the very first connect:
+  // load() already joined (emits are buffered until connected) and fetched.
+  // (The per-user notification room is joined server-side on every connect.)
+  let connectedBefore = socket.connected;
+  socket.on("connect", () => {
+    if (!connectedBefore) {
+      connectedBefore = true;
+      return;
+    }
+    if (get().boardId) void get().resync();
+  });
+  // L6: check the boardId like the other "created" handlers do (older
+  // servers didn't send one, hence the `boardId &&`)
+  on("board.memberUpserted", ({ boardId, member }) =>
+    set((s) =>
+      boardId && boardId !== s.boardId
+        ? s
+        : { members: [...s.members.filter((m) => m.id !== member.id), member] },
+    ),
   );
-  on("board.memberRemoved", ({ userId }) =>
-    set((s) => ({ members: s.members.filter((m) => m.id !== userId) })),
+  on("board.memberRemoved", ({ boardId, userId }) =>
+    set((s) => (boardId && boardId !== s.boardId ? s : { members: s.members.filter((m) => m.id !== userId) })),
+  );
+
+  // M9: the server re-ranked a list (or the board's lists) to break a rank
+  // tie. Sent to every client, the mover included.
+  const applyRanks = <T extends { id: string; rank: string }>(xs: T[], ranks: Array<{ id: string; rank: string }>) => {
+    const m = new Map(ranks.map((r) => [r.id, r.rank]));
+    return sortRank(xs.map((x) => (m.has(x.id) ? { ...x, rank: m.get(x.id)! } : x)));
+  };
+  on("cards.reranked", ({ boardId, ranks }) =>
+    set((s) => (boardId !== s.boardId ? s : { cards: applyRanks(s.cards, ranks) })),
+  );
+  on("lists.reranked", ({ boardId, ranks }) =>
+    set((s) => (boardId !== s.boardId ? s : { lists: applyRanks(s.lists, ranks) })),
   );
 
   on("list.created", ({ list }) =>
@@ -264,13 +379,16 @@ export const useBoard = create<BoardState>((set, get) => {
   on("checklistItem.created", ({ cardId }) =>
     bump(cardId, (b) => ({ ...b, checklist: { total: (b.checklist?.total ?? 0) + 1, done: b.checklist?.done ?? 0 } })),
   );
-  on("checklistItem.updated", ({ cardId, item }) =>
+  // L6: only a change of `done` moves the count. The server sends the item's
+  // previous state as prevDone; a text/assignee/due edit used to count as +/-1.
+  on("checklistItem.updated", ({ cardId, item, prevDone }) => {
+    if (typeof prevDone !== "boolean" || prevDone === item.done) return;
     bump(cardId, (b) =>
       b.checklist
         ? { ...b, checklist: { ...b.checklist, done: Math.max(0, Math.min(b.checklist.total, b.checklist.done + (item.done ? 1 : -1))) } }
         : b,
-    ),
-  );
+    );
+  });
   on("checklistItem.deleted", ({ cardId }) =>
     bump(cardId, (b) =>
       b.checklist
@@ -278,6 +396,14 @@ export const useBoard = create<BoardState>((set, get) => {
         : b,
     ),
   );
+
+  /** per-row move counter, so a slow PATCH response can't undo a newer move */
+  const moveSeq = new Map<string, number>();
+  const bumpSeq = (id: string) => {
+    const n = (moveSeq.get(id) ?? 0) + 1;
+    moveSeq.set(id, n);
+    return n;
+  };
 
   /* ------------------------------------------------------------- store */
   return {
@@ -292,6 +418,7 @@ export const useBoard = create<BoardState>((set, get) => {
     loading: false,
     error: null,
     board: null,
+    starred: false,
     myAccess: null,
     lists: [],
     cards: [],
@@ -303,31 +430,21 @@ export const useBoard = create<BoardState>((set, get) => {
 
     async load(boardId) {
       set({ boardId, loading: true, error: null });
-      getSocket().emit("board:join", boardId);
-      try {
-        const data = await api.get<BoardFull>(`/api/boards/${boardId}/full`);
-        set({
-          loading: false,
-          board: data.board,
-          myAccess: data.myAccess,
-          lists: sortRank(data.lists),
-          cards: sortRank(data.cards),
-          labels: data.labels,
-          members: data.members,
-          teamIds: data.teamIds,
-          customFieldDefs: sortRank(data.customFieldDefs),
-          links: data.links ?? [],
-        });
-      } catch (err: any) {
-        set({ loading: false, error: err.message ?? "Failed to load board" });
-      }
+      await fetchBoard(boardId);
+    },
+
+    async resync() {
+      // same as load() but without the loading flag, so the board doesn't
+      // flash a spinner on every reconnect
+      const { boardId } = get();
+      if (boardId) await fetchBoard(boardId);
     },
 
     clear() {
       const id = get().boardId;
       if (id) getSocket().emit("board:leave", id);
       set({
-        boardId: null, board: null, myAccess: null, error: null, filter: EMPTY_FILTER,
+        boardId: null, board: null, starred: false, myAccess: null, error: null, filter: EMPTY_FILTER,
         lists: [], cards: [], labels: [], members: [], teamIds: [], customFieldDefs: [], links: [],
       });
     },
@@ -354,13 +471,28 @@ export const useBoard = create<BoardState>((set, get) => {
       const lo = afterId ? lists.find((l) => l.id === afterId)?.rank ?? null : null;
       const hi = beforeId ? lists.find((l) => l.id === beforeId)?.rank ?? null : null;
       let rank: string;
-      try {
-        rank = between(lo, hi);
-      } catch {
-        return;
+      if (lo !== null && lo === hi) {
+        // tied neighbours (M9): no key fits between them. Sit on the tie for
+        // now; the server re-ranks the board's lists and we adopt its answer.
+        rank = lo;
+      } else {
+        try {
+          rank = between(lo, hi);
+        } catch {
+          return;
+        }
       }
       set((s) => ({ lists: sortRank(s.lists.map((l) => (l.id === id ? { ...l, rank } : l))) }));
-      api.patch(`/api/lists/${id}`, { move: { beforeId, afterId } }).catch(() => get().load(get().boardId!));
+      const seq = bumpSeq(id);
+      api
+        .patch<{ list: List }>(`/api/lists/${id}`, { move: { beforeId, afterId } })
+        // M9: adopt the server's rank (our own echo is filtered out, so the
+        // local guess could otherwise differ from the DB until reload)
+        .then(({ list }) => {
+          if (moveSeq.get(id) !== seq || !list) return; // a newer move of this list is in flight
+          set((s) => ({ lists: sortRank(s.lists.map((l) => (l.id === id ? { ...l, rank: list.rank } : l))) }));
+        })
+        .catch(() => get().load(get().boardId!));
     },
 
     async addCard(listId, title, position = "bottom") {
@@ -370,8 +502,16 @@ export const useBoard = create<BoardState>((set, get) => {
 
     moveCard(id, listId, beforeId, afterId) {
       get().moveCardLocal(id, listId, beforeId, afterId);
+      const seq = bumpSeq(id);
       api
-        .patch(`/api/cards/${id}`, { move: { listId, beforeId, afterId } })
+        .patch<{ card: Card }>(`/api/cards/${id}`, { move: { listId, beforeId, afterId } })
+        // M9: adopt the server's rank + list, unless a newer move superseded this one
+        .then(({ card }) => {
+          if (moveSeq.get(id) !== seq || !card) return;
+          set((s) => ({
+            cards: sortRank(s.cards.map((c) => (c.id === id ? { ...c, listId: card.listId, rank: card.rank } : c))),
+          }));
+        })
         .catch(() => get().load(get().boardId!));
     },
 
@@ -381,10 +521,14 @@ export const useBoard = create<BoardState>((set, get) => {
       const lo = afterId ? inList.find((c) => c.id === afterId)?.rank ?? null : null;
       const hi = beforeId ? inList.find((c) => c.id === beforeId)?.rank ?? null : null;
       let rank: string;
-      try {
-        rank = between(lo, hi && (!lo || lo < hi) ? hi : null);
-      } catch {
-        rank = between(lo, null);
+      if (lo !== null && lo === hi) {
+        rank = lo; // tied neighbours (M9): the server re-ranks the list; see moveList
+      } else {
+        try {
+          rank = between(lo, hi && (!lo || lo < hi) ? hi : null);
+        } catch {
+          rank = between(lo, null);
+        }
       }
       set((s) => ({
         cards: sortRank(s.cards.map((c) => (c.id === id ? { ...c, listId, rank } : c))),

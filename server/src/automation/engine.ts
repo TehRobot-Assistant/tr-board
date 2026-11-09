@@ -9,16 +9,32 @@
  *          assign_member, unassign_member, set_field, add_checklist,
  *          comment, notify, archive, mark_due_complete
  *
- * Loop safety: automation-caused mutations re-dispatch with depth+1 and stop
- * at MAX_DEPTH, so "move → rule moves it again" chains terminate.
+ * Loop safety (H2). A depth limit alone bounded how DEEP a chain went but not
+ * how WIDE: 5 rules x 10 add_label actions re-dispatching each other produced
+ * thousands of runs from one click. Every chain started by one real event now
+ * shares a Chain context with:
+ *   - MAX_DEPTH hops (automation-caused events still re-dispatch, so rule
+ *     chaining like "moved to Done -> archive" keeps working, but only 3 deep),
+ *   - MAX_CHAIN_ACTIONS executed actions in total, across every branch,
+ *   - a (rule, card, event) dedupe so a rule never re-runs on the same card
+ *     for the same kind of event within one chain (stops A->B->A ping-pong).
+ * Rules per board are capped at MAX_RULES_PER_BOARD at creation time.
  */
-import { and, asc, desc, eq, gt, inArray, isNotNull, lt } from "drizzle-orm";
+import { spawnNextOccurrence } from "../lib/recurrence.js";
+import { and, desc, eq, gt, isNotNull, lt, sql } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
+import { userCanReadBoard } from "../lib/perms.js";
 import { after } from "../lib/rank.js";
 import { emitBoard, emitUser } from "../sockets/index.js";
 import { logActivity } from "../lib/activity.js";
 
 const MAX_DEPTH = 3;
+/** total actions one triggering event may cause, summed over the whole chain */
+export const MAX_CHAIN_ACTIONS = 100;
+/** enforced in routes/phase1.ts (and board copy) when rules are created */
+export const MAX_RULES_PER_BOARD = 50;
+
+type Chain = { depth: number; budget: { left: number }; seen: Set<string> };
 
 export type AutomationEvent = {
   type:
@@ -37,19 +53,32 @@ export type AutomationEvent = {
   userId?: string;
   fieldId?: string;
   checklistId?: string;
+  /**
+   * due_approaching only: the rule whose window this card entered. Each
+   * due rule has its own hoursBefore, so the ticker fires per rule; without
+   * this, one rule's tick ran every due_approaching rule on the board.
+   */
+  ruleId?: string;
 };
 
 type Rule = typeof schema.automationRules.$inferSelect;
 
-/** fire-and-forget from routes — never blocks or fails a request */
+/**
+ * Fire-and-forget from routes — never blocks or fails a request. Routes call
+ * this without `parent`, which starts a fresh chain with a full budget; the
+ * engine passes the parent chain for automation-caused events.
+ */
 export function dispatchAutomation(
   boardId: string,
   event: AutomationEvent,
   actorId: string | null,
-  depth = 0,
+  parent?: Chain,
 ): void {
-  run(boardId, event, actorId, depth).catch((err) =>
-    console.error("automation error:", err.message),
+  const chain: Chain = parent
+    ? { depth: parent.depth + 1, budget: parent.budget, seen: parent.seen }
+    : { depth: 0, budget: { left: MAX_CHAIN_ACTIONS }, seen: new Set() };
+  run(boardId, event, actorId, chain).catch((err) =>
+    console.error("automation error:", err instanceof Error ? err.message : err),
   );
 }
 
@@ -57,9 +86,9 @@ async function run(
   boardId: string,
   event: AutomationEvent,
   actorId: string | null,
-  depth: number,
+  chain: Chain,
 ): Promise<void> {
-  if (depth >= MAX_DEPTH) return;
+  if (chain.depth >= MAX_DEPTH || chain.budget.left <= 0) return;
   const rules = await db
     .select()
     .from(schema.automationRules)
@@ -70,10 +99,14 @@ async function run(
   if (!card) return;
 
   for (const rule of rules) {
+    if (chain.budget.left <= 0) break;
     if (!triggerMatches(rule, event)) continue;
+    const key = `${rule.id}:${card.id}:${event.type}`;
+    if (chain.seen.has(key)) continue;
     if (!(await conditionsHold(rule, card.id, event.listId))) continue;
+    chain.seen.add(key);
     try {
-      await applyActions(rule, boardId, event, actorId, depth);
+      await applyActions(rule, boardId, event, actorId, chain);
       await db.insert(schema.automationRuns).values({ ruleId: rule.id, cardId: card.id, ok: true, detail: event.type });
     } catch (err) {
       await db.insert(schema.automationRuns).values({
@@ -96,6 +129,8 @@ function triggerMatches(rule: Rule, event: AutomationEvent): boolean {
       return !t.listId || t.listId === event.listId;
     case "label_added":
       return !t.labelId || t.labelId === event.labelId;
+    case "due_approaching":
+      return !event.ruleId || event.ruleId === rule.id;
     case "field_changed":
       return !(t as { fieldId?: string }).fieldId || (t as { fieldId?: string }).fieldId === event.fieldId;
     default:
@@ -145,12 +180,18 @@ async function applyActions(
   boardId: string,
   event: AutomationEvent,
   actorId: string | null,
-  depth: number,
+  chain: Chain,
 ): Promise<void> {
   const cardId = event.cardId;
   const reload = async () => (await db.select().from(schema.cards).where(eq(schema.cards.id, cardId)))[0];
 
   for (const action of rule.actions as Array<Record<string, any>>) {
+    if (chain.budget.left <= 0) {
+      // Throwing records this run as failed in automation_runs, so the rule log
+      // shows why it stopped part-way (and "ok" always means every action ran).
+      throw new Error(`stopped: one event may cause at most ${MAX_CHAIN_ACTIONS} automation actions`);
+    }
+    chain.budget.left--;
     const card = await reload();
     if (!card) return; // deleted mid-chain
 
@@ -174,7 +215,7 @@ async function applyActions(
           .returning();
         emitBoard(boardId, "card.updated", { card: updated });
         logActivity({ boardId, cardId, userId: null, type: "automation.moved", data: { rule: rule.name, to: target.name } });
-        dispatchAutomation(boardId, { type: "card_moved", cardId, listId: target.id, fromListId: card.listId }, actorId, depth + 1);
+        dispatchAutomation(boardId, { type: "card_moved", cardId, listId: target.id, fromListId: card.listId }, actorId, chain);
         break;
       }
       case "set_due": {
@@ -204,6 +245,8 @@ async function applyActions(
           .where(eq(schema.cards.id, cardId))
           .returning();
         emitBoard(boardId, "card.updated", { card: updated });
+        // a rule completing a repeating card must roll it on like a person would
+        await spawnNextOccurrence(cardId, null);
         break;
       }
       case "add_label": {
@@ -214,7 +257,7 @@ async function applyActions(
         if (!label) break;
         await db.insert(schema.cardLabels).values({ cardId, labelId: label.id }).onConflictDoNothing();
         emitBoard(boardId, "card.labelAdded", { cardId, labelId: label.id });
-        dispatchAutomation(boardId, { type: "label_added", cardId, listId: card.listId, labelId: label.id }, actorId, depth + 1);
+        dispatchAutomation(boardId, { type: "label_added", cardId, listId: card.listId, labelId: label.id }, actorId, chain);
         break;
       }
       case "remove_label": {
@@ -256,7 +299,7 @@ async function applyActions(
             set: { value: action.value },
           });
         emitBoard(boardId, "card.fieldChanged", { cardId, fieldId: def.id, value: action.value });
-        dispatchAutomation(boardId, { type: "field_changed", cardId, listId: card.listId, fieldId: def.id }, actorId, depth + 1);
+        dispatchAutomation(boardId, { type: "field_changed", cardId, listId: card.listId, fieldId: def.id }, actorId, chain);
         break;
       }
       case "add_checklist": {
@@ -302,7 +345,11 @@ async function applyActions(
                 .from(schema.cardMembers)
                 .where(eq(schema.cardMembers.cardId, cardId))
             ).map((r) => r.userId);
-        for (const userId of targets) {
+        for (const userId of new Set(targets)) {
+          // M8: the notification carries the card title + board id; only send
+          // it to people who can already read the board (also covers
+          // action.userId, which is free-form in the rule)
+          if (!(await userCanReadBoard(userId, boardId))) continue;
           const [n] = await db
             .insert(schema.notifications)
             .values({
@@ -329,46 +376,68 @@ async function applyActions(
 
 /* ------------------------------------------------- due-approaching ticker */
 
-const notifiedDue = new Set<string>(); // cardId:ruleId per process lifetime
+/**
+ * Claim the (rule, card, due date) firing. M10: the dedupe used to be an
+ * in-memory Set (also cleared past 10k entries), so every restart re-fired
+ * every card in its window: duplicate comments and notifications, and
+ * move/set_due actions re-ran. Now a row in automation_due_fired, claimed
+ * atomically: the upsert only writes (and returns a row) when there is no
+ * firing yet for this rule+card or it was for a different due date, so a
+ * rescheduled card fires again but a restart doesn't, and two overlapping
+ * ticks can't both claim it.
+ */
+async function claimDueFiring(ruleId: string, cardId: string, dueAt: Date): Promise<boolean> {
+  const rows = await db
+    .insert(schema.automationDueFired)
+    .values({ ruleId, cardId, dueAt })
+    .onConflictDoUpdate({
+      target: [schema.automationDueFired.ruleId, schema.automationDueFired.cardId],
+      set: { dueAt, firedAt: new Date() },
+      setWhere: sql`${schema.automationDueFired.dueAt} is distinct from excluded.due_at`,
+    })
+    .returning({ ruleId: schema.automationDueFired.ruleId });
+  return rows.length > 0;
+}
 
-/** every 10 min: fire due_approaching rules for cards inside their window */
-export function startDueTicker(): NodeJS.Timeout {
-  const tick = async () => {
-    try {
-      const rules = await db
-        .select()
-        .from(schema.automationRules)
-        .where(eq(schema.automationRules.enabled, true));
-      const dueRules = rules.filter((r) => (r.trigger as { type?: string }).type === "due_approaching");
-      for (const rule of dueRules) {
-        const hours = Number((rule.trigger as { hoursBefore?: number }).hoursBefore ?? 24);
-        const now = new Date();
-        const windowEnd = new Date(now.getTime() + hours * 3600_000);
-        const cards = await db
-          .select()
-          .from(schema.cards)
-          .where(
-            and(
-              eq(schema.cards.boardId, rule.boardId),
-              eq(schema.cards.archived, false),
-              eq(schema.cards.dueComplete, false),
-              isNotNull(schema.cards.dueAt),
-              gt(schema.cards.dueAt, now),
-              lt(schema.cards.dueAt, windowEnd),
-            ),
-          );
-        for (const card of cards) {
-          const key = `${card.id}:${rule.id}`;
-          if (notifiedDue.has(key)) continue;
-          notifiedDue.add(key);
-          dispatchAutomation(rule.boardId, { type: "due_approaching", cardId: card.id, listId: card.listId }, null);
-        }
-      }
-      if (notifiedDue.size > 10_000) notifiedDue.clear();
-    } catch (err) {
-      console.error("due ticker error:", err instanceof Error ? err.message : err);
+/** one pass: fire due_approaching rules for cards inside their window */
+export async function dueTick(): Promise<void> {
+  const rules = await db
+    .select()
+    .from(schema.automationRules)
+    .where(eq(schema.automationRules.enabled, true));
+  const dueRules = rules.filter((r) => (r.trigger as { type?: string }).type === "due_approaching");
+  for (const rule of dueRules) {
+    const hours = Number((rule.trigger as { hoursBefore?: number }).hoursBefore ?? 24);
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + hours * 3600_000);
+    const cards = await db
+      .select()
+      .from(schema.cards)
+      .where(
+        and(
+          eq(schema.cards.boardId, rule.boardId),
+          eq(schema.cards.archived, false),
+          eq(schema.cards.dueComplete, false),
+          isNotNull(schema.cards.dueAt),
+          gt(schema.cards.dueAt, now),
+          lt(schema.cards.dueAt, windowEnd),
+        ),
+      );
+    for (const card of cards) {
+      if (!(await claimDueFiring(rule.id, card.id, card.dueAt!))) continue;
+      dispatchAutomation(
+        rule.boardId,
+        { type: "due_approaching", cardId: card.id, listId: card.listId, ruleId: rule.id },
+        null,
+      );
     }
-  };
-  tick();
+  }
+}
+
+/** every 10 min (and once at boot) */
+export function startDueTicker(): NodeJS.Timeout {
+  const tick = () =>
+    dueTick().catch((err) => console.error("due ticker error:", err instanceof Error ? err.message : err));
+  void tick();
   return setInterval(tick, 10 * 60_000);
 }

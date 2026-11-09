@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
-import { useAuth } from "../lib/auth";
 import { useBoard } from "../stores/board";
 import { TopBar, Avatar, usePopover } from "../components/Chrome";
 import KanbanView from "../components/KanbanView";
@@ -24,7 +23,6 @@ type ViewKind = "board" | "table" | "calendar" | "timeline" | "dashboard";
 export default function BoardPage() {
   const { boardId, cardId } = useParams<{ boardId: string; cardId?: string }>();
   const nav = useNavigate();
-  const { user } = useAuth();
   const s = useBoard();
   const [view, setView] = useState<ViewKind>("board");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -57,7 +55,6 @@ export default function BoardPage() {
 
   const board = s.board;
   const canWrite = !!s.myAccess?.canWrite;
-  const mine = s.members.find((m) => m.id === user?.id);
 
   return (
     <div className={`flex h-full flex-col ${BG[board.background] ?? "bg-board-navy"}`}>
@@ -65,14 +62,14 @@ export default function BoardPage() {
       <div className="flex h-11 shrink-0 items-center gap-2 bg-black/20 px-3 text-white backdrop-blur-sm">
         <BoardName board={board} canRename={canWrite} />
         <button
-          title={mine?.starred ? "Unstar" : "Star"}
+          title={s.starred ? "Unstar" : "Star"}
           className="btn-ghost !px-1.5 !py-1 !text-white/80 hover:!bg-white/15"
           onClick={async () => {
-            await api.put(`/api/boards/${board.id}/star`, { starred: !mine?.starred });
-            s.load(board.id);
+            await api.put(`/api/boards/${board.id}/star`, { starred: !s.starred });
+            s.resync();
           }}
         >
-          {mine?.starred ? "★" : "☆"}
+          {s.starred ? "★" : "☆"}
         </button>
         <span className="rounded bg-white/15 px-2 py-0.5 text-[11px] uppercase tracking-wide">
           {board.visibility}

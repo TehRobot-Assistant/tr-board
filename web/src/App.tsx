@@ -8,6 +8,7 @@ import AdminPage from "./pages/Admin";
 import SharedBoard from "./pages/SharedBoard";
 import MyWork from "./pages/MyWork";
 import PublicForm from "./pages/PublicForm";
+import AccountPage, { EnrolRequired } from "./pages/Account";
 
 function Gate({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -19,6 +20,9 @@ function Gate({ children }: { children: React.ReactNode }) {
     );
   }
   if (!user) return <Navigate to="/login" replace />;
+  // instance requires 2FA: the server refuses everything else for this
+  // session, so show enrolment instead of a page full of 403s
+  if (user.mustEnrol2fa) return <EnrolRequired />;
   return <>{children}</>;
 }
 
@@ -35,6 +39,7 @@ export default function App() {
         <Route path="/b/:boardId" element={<Gate><BoardPage /></Gate>} />
         <Route path="/b/:boardId/c/:cardId" element={<Gate><BoardPage /></Gate>} />
         <Route path="/admin" element={<Gate><AdminPage /></Gate>} />
+        <Route path="/account" element={<Gate><AccountPage /></Gate>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AuthProvider>

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { describeRecurrence } from "../lib/recurrence";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -86,7 +87,7 @@ export default function CardChip({
         </div>
       )}
 
-      {(card.dueAt || b.comments > 0 || b.attachments > 0 || b.checklist || cardMembers.length > 0 || openBlockers.length > 0) && (
+      {(card.dueAt || card.recurrence || b.comments > 0 || b.attachments > 0 || b.checklist || cardMembers.length > 0 || openBlockers.length > 0) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] opacity-90">
           {openBlockers.length > 0 && (
             <span
@@ -99,6 +100,11 @@ export default function CardChip({
           {card.dueAt && (
             <span className={`rounded px-1.5 py-0.5 font-medium ${dueTone(card)}`}>
               ⏱ {fmtDue(card.dueAt)}
+            </span>
+          )}
+          {card.recurrence && (
+            <span title={describeRecurrence(card.recurrence)} aria-label={describeRecurrence(card.recurrence)}>
+              ↻
             </span>
           )}
           {b.checklist && (
@@ -167,8 +173,10 @@ function ExpandedCard({ card, onClose }: { card: Card; onClose: () => void }) {
   // live-refresh while open when this card changes on the board
   useEffect(() => {
     const socket = getSocket();
-    const refresh = (p: { cardId?: string }) => {
-      if (p?.cardId === card.id) qc.invalidateQueries({ queryKey: ["card", card.id] });
+    // card.updated carries { card }, the others { cardId } (L6: this only
+    // looked at cardId, so edits to the card itself never refreshed the panel)
+    const refresh = (p: { cardId?: string; card?: { id?: string } }) => {
+      if ((p?.cardId ?? p?.card?.id) === card.id) qc.invalidateQueries({ queryKey: ["card", card.id] });
     };
     for (const ev of ["comment.created", "comment.deleted", "attachment.created", "attachment.deleted", "card.updated"]) {
       socket.on(ev, refresh);
@@ -280,8 +288,15 @@ function ExpandedCard({ card, onClose }: { card: Card; onClose: () => void }) {
 const IMG_URL_RE = /\.(png|jpe?g|gif|webp|avif|svg)(\?[^\s]*)?$/i;
 const URL_RE = /(https?:\/\/[^\s<]+)/g;
 
-/** minimal rich text: linkify URLs (image URLs get a thumbnail), keep newlines, **bold** */
+/**
+ * minimal rich text: linkify URLs, keep newlines, **bold**. Image URLs get a
+ * thumbnail only on click (L4): auto-loading any https image let anyone who
+ * can write a description or comment, including anonymous public-form
+ * submitters, plant a tracking pixel that logs every viewer's IP. Same-origin
+ * images (our own attachments) still load straight away.
+ */
 function RichText({ text }: { text: string }) {
+  const [showImages, setShowImages] = useState(false);
   const imageUrls: string[] = [];
   const nodes: ReactNode[] = text.split(URL_RE).map((part, i) => {
     if (/^https?:\/\//.test(part)) {
@@ -300,17 +315,38 @@ function RichText({ text }: { text: string }) {
   return (
     <>
       <p className="whitespace-pre-wrap break-words">{nodes}</p>
-      {imageUrls.length > 0 && (
+      {imageUrls.length > 0 && !showImages && !imageUrls.slice(0, 4).every(sameOrigin) && (
+        <button
+          type="button"
+          className="mt-1.5 text-[11px] underline opacity-60 hover:opacity-100"
+          title="Loading them contacts the sites they're hosted on"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowImages(true);
+          }}
+        >
+          Show {Math.min(imageUrls.length, 4)} linked image{imageUrls.length > 1 ? "s" : ""}
+        </button>
+      )}
+      {imageUrls.length > 0 && (showImages || imageUrls.slice(0, 4).every(sameOrigin)) && (
         <div className="mt-1.5 grid grid-cols-2 gap-1.5">
           {imageUrls.slice(0, 4).map((u, i) => (
             <a key={i} href={u} target="_blank" rel="noreferrer">
-              <img src={u} alt="" loading="lazy" className="h-20 w-full rounded-md object-cover ring-1 ring-ink/10 dark:ring-paper/15" />
+              <img src={u} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-20 w-full rounded-md object-cover ring-1 ring-ink/10 dark:ring-paper/15" />
             </a>
           ))}
         </div>
       )}
     </>
   );
+}
+
+function sameOrigin(url: string): boolean {
+  try {
+    return new URL(url).origin === location.origin;
+  } catch {
+    return false;
+  }
 }
 
 function fileIcon(mime: string): string {
@@ -330,7 +366,10 @@ function fmtBytes(n: number): string {
 }
 
 function MirrorChip({ card, overlay }: { card: Card; overlay: boolean }) {
-  const m = card.mirror ?? null;
+  const snap = card.mirror ?? null;
+  // M2: the server withholds the face when you can't read the source board
+  if (snap && "restricted" in snap) return <RestrictedMirrorChip overlay={overlay} />;
+  const m = snap;
   const face = m ?? {
     title: card.title, dueAt: null, dueComplete: false, archived: false,
     labels: [], boardName: "deleted board", sourceBoardId: "", sourceCardId: "",
@@ -375,6 +414,24 @@ function MirrorChip({ card, overlay }: { card: Card; overlay: boolean }) {
     >
       {body}
     </Link>
+  );
+}
+
+function RestrictedMirrorChip({ overlay }: { overlay: boolean }) {
+  return (
+    <div
+      title="Mirror of a card on a board you can't open"
+      className={`rounded-card border-l-4 border-[#89609e] bg-white p-2.5 text-sm opacity-70 shadow-card dark:bg-ink-3 ${
+        overlay ? "rotate-2 shadow-drag" : ""
+      }`}
+    >
+      <p className="leading-snug opacity-80">Mirrored card</p>
+      <div className="mt-2 text-[11px]">
+        <span className="rounded bg-[#89609e]/15 px-1.5 py-0.5 font-medium text-[#89609e] dark:bg-[#89609e]/30 dark:text-[#c9a6e0]">
+          ⇄ on a board you can't open
+        </span>
+      </div>
+    </div>
   );
 }
 

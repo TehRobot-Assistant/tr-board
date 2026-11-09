@@ -13,6 +13,7 @@ import { emitBoard } from "../sockets/index.js";
 import { logActivity } from "../lib/activity.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 import { dispatchAutomation } from "../automation/engine.js";
+import { RateLimiter } from "../lib/ratelimit.js";
 
 const fieldSchema = z.object({
   id: z.string().min(1).max(40),
@@ -92,19 +93,9 @@ export async function formRoutes(app: FastifyInstance) {
 
 /* --------------------------------------------------------------- public */
 
-// naive per-IP throttle: 20 submissions / 10 min, swept opportunistically
-const submits = new Map<string, { n: number; resetAt: number }>();
-function throttled(ip: string): boolean {
-  const now = Date.now();
-  if (submits.size > 5000) submits.clear();
-  const cur = submits.get(ip);
-  if (!cur || cur.resetAt < now) {
-    submits.set(ip, { n: 1, resetAt: now + 10 * 60_000 });
-    return false;
-  }
-  cur.n += 1;
-  return cur.n > 20;
-}
+// per-IP throttle: 20 submissions / 10 min. req.ip is only the real client
+// behind a proxy when TRUST_PROXY is set (M3); otherwise it is one shared bucket.
+const submits = new RateLimiter(20, 10 * 60_000);
 
 export async function publicFormRoutes(app: FastifyInstance) {
   app.get("/api/public/forms/:token", async (req, reply) => {
@@ -121,7 +112,7 @@ export async function publicFormRoutes(app: FastifyInstance) {
   app.post("/api/public/forms/:token", async (req, reply) => {
     const { token } = req.params as { token: string };
     if (!/^[0-9a-f]{32}$/.test(token)) return reply.code(404).send({ error: "not found" });
-    if (throttled(req.ip)) return reply.code(429).send({ error: "too many submissions — try again later" });
+    if (submits.hit(req.ip)) return reply.code(429).send({ error: "too many submissions — try again later" });
     const [form] = await db.select().from(schema.forms).where(eq(schema.forms.token, token));
     if (!form || !form.enabled) return reply.code(404).send({ error: "not found" });
 

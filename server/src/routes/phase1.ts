@@ -11,7 +11,7 @@ import { after } from "../lib/rank.js";
 import { emitBoard } from "../sockets/index.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 import { loadCard } from "./cards.js";
-import { dispatchAutomation } from "../automation/engine.js";
+import { dispatchAutomation, MAX_RULES_PER_BOARD } from "../automation/engine.js";
 
 const optionSchema = z.object({
   id: z.string().min(1).max(40),
@@ -164,6 +164,13 @@ export async function phase1Routes(app: FastifyInstance) {
     const body = parseBody(ruleSchema, req, reply);
     if (!body) return;
     if (!(await requireBoard(req, reply, boardId, "admin"))) return;
+    // H2: bound how many rules one event can fan out to. Not transactional, so
+    // two simultaneous creates could overshoot by one; the per-chain action
+    // budget in the engine is the hard limit, this just keeps boards sane.
+    const count = await db.$count(schema.automationRules, eq(schema.automationRules.boardId, boardId));
+    if (count >= MAX_RULES_PER_BOARD) {
+      return reply.code(409).send({ error: `a board can have at most ${MAX_RULES_PER_BOARD} automation rules` });
+    }
     const [rule] = await db
       .insert(schema.automationRules)
       .values({ boardId, ...body, createdBy: req.user.id })

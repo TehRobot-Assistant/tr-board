@@ -8,8 +8,21 @@ import { logActivity } from "../lib/activity.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 import { rankBetween } from "./lists.js";
 import { dispatchAutomation } from "../automation/engine.js";
-import { deleteMirrorsOf, mirrorSnapshots, propagateMirror } from "../lib/mirror.js";
-import { boardAccess } from "../lib/perms.js";
+import { announceMirrorsDeleted, mirrorSnapshots, mirrorsOf, propagateMirror } from "../lib/mirror.js";
+import { boardAccess, userCanReadBoard } from "../lib/perms.js";
+import { emitBoardEach } from "../sockets/index.js";
+import { removeCardUploads } from "../lib/uploads.js";
+import type { Reranked } from "./lists.js";
+import { normaliseRule, reanchor, recurrenceInputSchema, type RecurrenceRule } from "../lib/recurrenceRule.js";
+import { spawnNextOccurrence } from "../lib/recurrence.js";
+
+/**
+ * Stored title of every mirror row (M2). The real face comes from the
+ * access-checked snapshot; the row's own title is visible to everyone on the
+ * target board (and in search, exports, My Work), so it must say nothing
+ * about the source.
+ */
+export const MIRROR_TITLE = "Mirrored card";
 
 export async function loadCard(id: string) {
   if (!uuidSchema.safeParse(id).success) return null;
@@ -130,6 +143,7 @@ export async function cardRoutes(app: FastifyInstance) {
         coverColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
         coverAttachmentId: uuidSchema.nullable().optional(),
         archived: z.boolean().optional(),
+        recurrence: recurrenceInputSchema.nullable().optional(),
         move: z
           .object({
             listId: uuidSchema,
@@ -147,10 +161,33 @@ export async function cardRoutes(app: FastifyInstance) {
     const access = await requireBoard(req, reply, card.boardId, "write");
     if (!access) return;
 
-    const { move, ...rest } = body;
+    const { move, recurrence, ...rest } = body;
     const patch: Record<string, unknown> = { ...rest, updatedAt: new Date() };
 
+    // Recurrence is anchored on the due date (lib/recurrenceRule.ts), so it
+    // needs one; clearing the due date clears the rule, and editing the due
+    // date re-anchors it (monthly "on the 31st" follows the new date).
+    const dueAfter = rest.dueAt !== undefined ? rest.dueAt : card.dueAt;
+    if (recurrence !== undefined) {
+      if (recurrence === null) patch.recurrence = null;
+      else {
+        if (card.mirrorOfCardId) return reply.code(400).send({ error: "a mirror can't repeat" });
+        if (!dueAfter) return reply.code(400).send({ error: "set a due date before making the card repeat" });
+        if (recurrence.listId) {
+          const [l] = await db
+            .select({ id: schema.lists.id })
+            .from(schema.lists)
+            .where(and(eq(schema.lists.id, recurrence.listId), eq(schema.lists.boardId, card.boardId)));
+          if (!l) return reply.code(400).send({ error: "that list is not on this board" });
+        }
+        patch.recurrence = normaliseRule(recurrence, dueAfter);
+      }
+    } else if (rest.dueAt !== undefined && card.recurrence) {
+      patch.recurrence = rest.dueAt ? reanchor(card.recurrence as RecurrenceRule, rest.dueAt) : null;
+    }
+
     let movedFrom: string | null = null;
+    let reranked: Reranked = [];
     if (move) {
       const [target] = await db
         .select()
@@ -158,12 +195,15 @@ export async function cardRoutes(app: FastifyInstance) {
         .where(and(eq(schema.lists.id, move.listId), eq(schema.lists.boardId, card.boardId)));
       if (!target) return reply.code(400).send({ error: "target list not on this board" });
       patch.listId = move.listId;
-      patch.rank = await rankBetween(
+      const r = await rankBetween(
         schema.cards,
         { col: schema.cards.listId, id: move.listId },
         move.beforeId,
         move.afterId,
+        id,
       );
+      patch.rank = r.rank;
+      reranked = r.reranked;
       if (move.listId !== card.listId) movedFrom = card.listId;
     }
 
@@ -172,6 +212,10 @@ export async function cardRoutes(app: FastifyInstance) {
       .set(patch)
       .where(eq(schema.cards.id, id))
       .returning();
+    // M9: sent to everyone including the mover (they can't derive these)
+    if (reranked.length) {
+      emitBoard(card.boardId, "cards.reranked", { boardId: card.boardId, listId: move!.listId, ranks: reranked });
+    }
     emitBoard(card.boardId, "card.updated", { card: updated }, originSocket(req));
     if (rest.title !== undefined || rest.dueAt !== undefined || rest.dueComplete !== undefined || rest.archived !== undefined) {
       propagateMirror(id).catch(() => {});
@@ -196,7 +240,10 @@ export async function cardRoutes(app: FastifyInstance) {
         data: { title: updated.title, dueAt: updated.dueAt?.toISOString() ?? null },
       });
     }
+    let nextCardId: string | null = null;
     if (rest.dueComplete !== undefined && rest.dueComplete) {
+      // awaited so the response (and the card.created event) already carry the next occurrence
+      nextCardId = await spawnNextOccurrence(id, req.user.id);
       dispatchAutomation(card.boardId, { type: "due_completed", cardId: id, listId: updated.listId }, req.user.id);
     }
     if (rest.archived !== undefined) {
@@ -205,7 +252,7 @@ export async function cardRoutes(app: FastifyInstance) {
         type: rest.archived ? "card.archived" : "card.restored", data: { title: updated.title },
       });
     }
-    return { card: updated };
+    return { card: nextCardId ? { ...updated, recurrence: null } : updated, nextCardId };
   });
 
   app.delete("/api/cards/:id", async (req, reply) => {
@@ -214,10 +261,12 @@ export async function cardRoutes(app: FastifyInstance) {
     if (!card) return reply.code(404).send({ error: "not found" });
     const access = await requireBoard(req, reply, card.boardId, "write");
     if (!access) return;
+    const mirrors = await mirrorsOf([id]); // before the FK cascade removes them (L7)
     await db.delete(schema.cards).where(eq(schema.cards.id, id));
     emitBoard(card.boardId, "card.deleted", { cardId: id, listId: card.listId }, originSocket(req));
     logActivity({ boardId: card.boardId, userId: req.user.id, type: "card.deleted", data: { title: card.title } });
-    deleteMirrorsOf(id).catch(() => {});
+    announceMirrorsDeleted(mirrors);
+    void removeCardUploads([id, ...mirrors.map((m) => m.id)]); // M6
     return { ok: true };
   });
 
@@ -253,25 +302,33 @@ export async function cardRoutes(app: FastifyInstance) {
       .values({
         boardId: targetList.boardId,
         listId: targetList.id,
-        title: source.title, // fallback face if the source ever vanishes
+        title: MIRROR_TITLE, // M2: see MIRROR_TITLE. The source can't vanish under a mirror now (FK cascade, L7)
         rank: after(last?.rank ?? null),
         mirrorOfCardId: source.id,
         createdBy: req.user.id,
       })
       .returning();
-    const snap = (await mirrorSnapshots([source.id])).get(source.id);
-    const payload = {
+    const base = {
       ...mirror,
       labelIds: [], memberIds: [], fieldValues: {},
       badges: { comments: 0, attachments: 0, checklist: null },
-      mirror: snap,
     };
-    emitBoard(targetList.boardId, "card.created", { card: payload }, originSocket(req));
+    const faceFor = async (u: { id: string; isAdmin: boolean }) =>
+      (await mirrorSnapshots([source.id], u)).get(source.id) ?? null;
+    // M2: per viewer: target-board members who can't read the source get a placeholder
+    void emitBoardEach(
+      targetList.boardId,
+      "card.created",
+      async (u) => ({ card: { ...base, mirror: await faceFor(u) } }),
+      originSocket(req),
+    );
+    // The activity log is shown to the whole target board, so it names neither
+    // the source card nor its board.
     logActivity({
       boardId: targetList.boardId, cardId: mirror.id, userId: req.user.id,
-      type: "card.mirrored", data: { title: source.title, fromBoard: snap?.boardName },
+      type: "card.mirrored", data: { title: MIRROR_TITLE },
     });
-    return { card: payload };
+    return { card: { ...base, mirror: await faceFor(req.user) } };
   });
 
   /* --------------------------------------------------- members on a card */
@@ -283,6 +340,11 @@ export async function cardRoutes(app: FastifyInstance) {
     const access = await requireBoard(req, reply, card.boardId, "write");
     if (!access) return;
     if (!uuidSchema.safeParse(userId).success) return reply.code(404).send({ error: "not found" });
+    // M8: assignees must be able to read the board. Anyone could be put on a
+    // card (and then got its title via notify); an unknown id was a 500.
+    if (!(await userCanReadBoard(userId, card.boardId))) {
+      return reply.code(400).send({ error: "that user can't see this board" });
+    }
     await db
       .insert(schema.cardMembers)
       .values({ cardId: id, userId })
@@ -298,6 +360,7 @@ export async function cardRoutes(app: FastifyInstance) {
     if (!card) return reply.code(404).send({ error: "not found" });
     const access = await requireBoard(req, reply, card.boardId, "write");
     if (!access) return;
+    if (!uuidSchema.safeParse(userId).success) return reply.code(404).send({ error: "not found" }); // L2
     await db
       .delete(schema.cardMembers)
       .where(and(eq(schema.cardMembers.cardId, id), eq(schema.cardMembers.userId, userId)));
@@ -332,6 +395,7 @@ export async function cardRoutes(app: FastifyInstance) {
     if (!card) return reply.code(404).send({ error: "not found" });
     const access = await requireBoard(req, reply, card.boardId, "write");
     if (!access) return;
+    if (!uuidSchema.safeParse(labelId).success) return reply.code(404).send({ error: "not found" }); // L2
     await db
       .delete(schema.cardLabels)
       .where(and(eq(schema.cardLabels.cardId, id), eq(schema.cardLabels.labelId, labelId)));

@@ -68,4 +68,30 @@ export function spread(n: number): string[] {
   return out;
 }
 
+/**
+ * n strictly increasing, fixed-width ranks spread evenly over the key space,
+ * for rebalancing a list whose ranks collided (M9). spread() above appends one
+ * after another, which grows the keys by a character every few items; this
+ * keeps them at 2-3 chars for any realistic list. No rank ends in "0": a key
+ * with a trailing minimum digit breaks between() when used as the upper bound
+ * (between("a", "a0") would return "a0i", which sorts after "a0").
+ */
+export function evenRanks(n: number): string[] {
+  let width = 1;
+  while (BASE ** width <= 2 * (n + 1)) width++;
+  const space = BASE ** width;
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    let v = Math.floor(((i + 1) * space) / (n + 1));
+    if (v % BASE === 0) v += 1; // spacing is >= 2, so this stays below the next key
+    let str = "";
+    for (let j = 0; j < width; j++) {
+      str = DIGITS[v % BASE] + str;
+      v = Math.floor(v / BASE);
+    }
+    out.push(str);
+  }
+  return out;
+}
+
 export { MIN };

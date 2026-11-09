@@ -1,9 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { visibleBoardIds, workspaceRoleOf } from "../lib/perms.js";
 import { parseBody, uuidSchema } from "./helpers.js";
+import { dropLostTeamAccess, dropSockets, stripWorkspaceAccess } from "../lib/revoke.js";
+import { removeCardUploads } from "../lib/uploads.js";
 
 const nameSchema = z.object({ name: z.string().trim().min(1).max(120) });
 
@@ -24,6 +26,26 @@ async function requireWs(
     return null;
   }
   return role;
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** Row-lock the workspace so membership role changes/removals run one at a time. */
+async function lockWorkspace(tx: Tx, workspaceId: string): Promise<void> {
+  await tx.execute(sql`select id from workspaces where id = ${workspaceId} for update`);
+}
+
+async function adminCount(tx: Tx, workspaceId: string): Promise<number> {
+  return tx.$count(
+    schema.workspaceMembers,
+    and(eq(schema.workspaceMembers.workspaceId, workspaceId), eq(schema.workspaceMembers.role, "admin")),
+  );
+}
+
+async function grantedBoards(teamId: string): Promise<string[]> {
+  return (
+    await db.select({ boardId: schema.boardTeams.boardId }).from(schema.boardTeams).where(eq(schema.boardTeams.teamId, teamId))
+  ).map((r) => r.boardId);
 }
 
 export async function workspaceRoutes(app: FastifyInstance) {
@@ -72,9 +94,9 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const stars = new Set(
       (
         await db
-          .select({ boardId: schema.boardMembers.boardId })
-          .from(schema.boardMembers)
-          .where(and(eq(schema.boardMembers.userId, req.user.id), eq(schema.boardMembers.starred, true)))
+          .select({ boardId: schema.boardStars.boardId })
+          .from(schema.boardStars)
+          .where(eq(schema.boardStars.userId, req.user.id))
       ).map((r) => r.boardId),
     );
 
@@ -124,21 +146,57 @@ export async function workspaceRoutes(app: FastifyInstance) {
       reply,
     );
     if (!body) return;
+    // L1: merge, don't replace. Sending only {boardCreation} used to wipe
+    // `inviting` and `visibilityChanges` back to their permissive defaults.
+    // jsonb || in SQL so two concurrent patches can't drop each other's keys.
     const [ws] = await db
       .update(schema.workspaces)
       .set({
         ...(body.name ? { name: body.name } : {}),
-        ...(body.settings ? { settings: body.settings } : {}),
+        ...(body.settings
+          ? { settings: sql`${schema.workspaces.settings} || ${JSON.stringify(body.settings)}::jsonb` }
+          : {}),
       })
       .where(eq(schema.workspaces.id, id))
       .returning();
     return { workspace: ws };
   });
 
+  /**
+   * L9: what deleting this workspace would destroy, for the confirm dialog.
+   * Deleting stays allowed for workspace admins even though it takes private
+   * boards they can't open (unchanged behaviour); the dialog says how many.
+   * Only counts are revealed, never names.
+   */
+  app.get("/api/workspaces/:id/deletion-impact", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await requireWs(req, reply, id, "admin"))) return;
+    const all = await db
+      .select({ id: schema.boards.id, visibility: schema.boards.visibility })
+      .from(schema.boards)
+      .where(eq(schema.boards.workspaceId, id));
+    const visible = await visibleBoardIds(req.user.id, id, req.user.isAdmin);
+    const priv = all.filter((b) => b.visibility === "private");
+    return {
+      boards: all.length,
+      privateBoards: priv.length,
+      hiddenPrivateBoards: priv.filter((b) => !visible.has(b.id)).length,
+    };
+  });
+
   app.delete("/api/workspaces/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await requireWs(req, reply, id, "admin"))) return;
+    // M6: the card rows cascade; their upload folders don't
+    const cardIds = (
+      await db
+        .select({ id: schema.cards.id })
+        .from(schema.cards)
+        .innerJoin(schema.boards, eq(schema.boards.id, schema.cards.boardId))
+        .where(eq(schema.boards.workspaceId, id))
+    ).map((c) => c.id);
     await db.delete(schema.workspaces).where(eq(schema.workspaces.id, id));
+    void removeCardUploads(cardIds);
     return { ok: true };
   });
 
@@ -163,15 +221,35 @@ export async function workspaceRoutes(app: FastifyInstance) {
     }
     const [user] = await db.select().from(schema.users).where(eq(schema.users.email, body.email));
     if (!user) return reply.code(404).send({ error: "no user with that email" });
-    await db
-      .insert(schema.workspaceMembers)
-      .values({ workspaceId: id, userId: user.id, role: body.role })
-      .onConflictDoUpdate({
-        target: [schema.workspaceMembers.workspaceId, schema.workspaceMembers.userId],
-        set: { role: body.role },
-      });
+
+    // H3: this endpoint upserts, so "invite" on an existing member is a role
+    // change. Only admins may change roles, and the last admin can never be
+    // demoted. The workspace row lock serialises role changes/removals so two
+    // concurrent demotions can't each see "another admin still exists".
+    const outcome = await db.transaction(async (tx) => {
+      await lockWorkspace(tx, id);
+      const [existing] = await tx
+        .select({ role: schema.workspaceMembers.role })
+        .from(schema.workspaceMembers)
+        .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.userId, user.id)));
+      if (existing) {
+        if (existing.role === body.role) return { role: existing.role };
+        if (meRole !== "admin") return { status: 403, error: "only workspace admins can change roles" };
+        if (existing.role === "admin" && (await adminCount(tx, id)) <= 1) {
+          return { status: 409, error: "cannot demote the last workspace admin" };
+        }
+        await tx
+          .update(schema.workspaceMembers)
+          .set({ role: body.role })
+          .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.userId, user.id)));
+        return { role: body.role };
+      }
+      await tx.insert(schema.workspaceMembers).values({ workspaceId: id, userId: user.id, role: body.role });
+      return { role: body.role };
+    });
+    if ("error" in outcome) return reply.code(outcome.status!).send({ error: outcome.error });
     return {
-      member: { id: user.id, name: user.name, email: user.email, avatarColor: user.avatarColor, role: body.role },
+      member: { id: user.id, name: user.name, email: user.email, avatarColor: user.avatarColor, role: outcome.role },
     };
   });
 
@@ -179,17 +257,30 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const { id, userId } = req.params as { id: string; userId: string };
     const meRole = await requireWs(req, reply, id, userId === req.user.id ? "member" : "admin");
     if (!meRole) return;
-    // never remove the last admin
-    const admins = await db
-      .select({ userId: schema.workspaceMembers.userId })
-      .from(schema.workspaceMembers)
-      .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.role, "admin")));
-    if (admins.length === 1 && admins[0].userId === userId) {
-      return reply.code(409).send({ error: "cannot remove the last workspace admin" });
+    if (!uuidSchema.safeParse(userId).success) return reply.code(404).send({ error: "not found" });
+    const outcome = await db.transaction(async (tx) => {
+      await lockWorkspace(tx, id); // see H3 note on the invite route
+      const [target] = await tx
+        .select({ role: schema.workspaceMembers.role })
+        .from(schema.workspaceMembers)
+        .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.userId, userId)));
+      if (!target) return { status: 404 as const };
+      // never remove the last admin
+      if (target.role === "admin" && (await adminCount(tx, id)) <= 1) return { status: 409 as const };
+      await tx
+        .delete(schema.workspaceMembers)
+        .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.userId, userId)));
+      // H5: leaving the workspace must also end board roles + team memberships
+      // in it; otherwise a removed board admin kept full access.
+      return { boardIds: await stripWorkspaceAccess(tx, id, userId) };
+    });
+    if ("status" in outcome) {
+      return outcome.status === 404
+        ? reply.code(404).send({ error: "not a member" })
+        : reply.code(409).send({ error: "cannot remove the last workspace admin" });
     }
-    await db
-      .delete(schema.workspaceMembers)
-      .where(and(eq(schema.workspaceMembers.workspaceId, id), eq(schema.workspaceMembers.userId, userId)));
+    // after commit, so a re-join attempt can't race and pass on the old rows
+    await dropSockets(outcome.boardIds, [userId]);
     return { ok: true };
   });
 
@@ -245,10 +336,16 @@ export async function workspaceRoutes(app: FastifyInstance) {
         ).map((r) => r.userId),
       );
       const valid = body.memberIds.filter((uid) => wsMembers.has(uid));
+      const before = (
+        await db.select({ userId: schema.teamMembers.userId }).from(schema.teamMembers).where(eq(schema.teamMembers.teamId, teamId))
+      ).map((r) => r.userId);
       await db.delete(schema.teamMembers).where(eq(schema.teamMembers.teamId, teamId));
       if (valid.length) {
         await db.insert(schema.teamMembers).values(valid.map((userId) => ({ teamId, userId })));
       }
+      // H5: users dropped from the team lose the team's board grants
+      const removed = before.filter((uid) => !valid.includes(uid));
+      if (removed.length) await dropLostTeamAccess(await grantedBoards(teamId), removed);
     }
     const [updated] = await db.select().from(schema.teams).where(eq(schema.teams.id, teamId));
     const memberIds = (
@@ -264,7 +361,13 @@ export async function workspaceRoutes(app: FastifyInstance) {
       : [];
     if (!team) return reply.code(404).send({ error: "not found" });
     if (!(await requireWs(req, reply, team.workspaceId, "admin"))) return;
+    // read grants + members before the cascade deletes them (H5)
+    const boards = await grantedBoards(teamId);
+    const members = (
+      await db.select({ userId: schema.teamMembers.userId }).from(schema.teamMembers).where(eq(schema.teamMembers.teamId, teamId))
+    ).map((r) => r.userId);
     await db.delete(schema.teams).where(eq(schema.teams.id, teamId));
+    await dropLostTeamAccess(boards, members);
     return { ok: true };
   });
 }

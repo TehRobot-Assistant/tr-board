@@ -6,30 +6,7 @@
 import type { FastifyInstance } from "fastify";
 import { and, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
-import { visibleBoardIds } from "../lib/perms.js";
-
-/** all board ids this user can see, across every workspace they belong to */
-async function allVisibleBoards(userId: string, isAdmin: boolean): Promise<Set<string>> {
-  const wsIds = isAdmin
-    ? (await db.select({ id: schema.workspaces.id }).from(schema.workspaces)).map((w) => w.id)
-    : (
-        await db
-          .select({ id: schema.workspaceMembers.workspaceId })
-          .from(schema.workspaceMembers)
-          .where(eq(schema.workspaceMembers.userId, userId))
-      ).map((w) => w.id);
-  const out = new Set<string>();
-  for (const wsId of wsIds) {
-    for (const id of await visibleBoardIds(userId, wsId, isAdmin)) out.add(id);
-  }
-  // guest boards (member of board but not its workspace)
-  const guestRows = await db
-    .select({ boardId: schema.boardMembers.boardId })
-    .from(schema.boardMembers)
-    .where(eq(schema.boardMembers.userId, userId));
-  for (const r of guestRows) out.add(r.boardId);
-  return out;
-}
+import { allVisibleBoards } from "../lib/perms.js";
 
 export async function personalRoutes(app: FastifyInstance) {
   app.get("/api/search", async (req) => {

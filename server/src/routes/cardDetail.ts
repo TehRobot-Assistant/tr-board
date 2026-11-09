@@ -4,6 +4,8 @@
  * client-side from these same events.
  */
 import fs from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
@@ -17,6 +19,7 @@ import { logActivity } from "../lib/activity.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 import { loadCard } from "./cards.js";
 import { dispatchAutomation } from "../automation/engine.js";
+import { userCanReadBoard } from "../lib/perms.js";
 
 const LABEL_COLORS = [
   "#61bd4f", "#f2d600", "#ff9f1a", "#eb5a46", "#c377e0",
@@ -173,13 +176,25 @@ export async function cardDetailRoutes(app: FastifyInstance) {
     const ctx = await checklistCtx(item.checklistId);
     if (!ctx) return reply.code(404).send({ error: "not found" });
     if (!(await requireBoard(req, reply, ctx.card.boardId, "write"))) return;
+    // M8: an assignee must be able to see the board (and must exist: an
+    // unknown id used to surface as a 500 from the FK)
+    if (body.assigneeId && !(await userCanReadBoard(body.assigneeId, ctx.card.boardId))) {
+      return reply.code(400).send({ error: "that user can't see this board" });
+    }
 
     const [updated] = await db
       .update(schema.checklistItems)
       .set(body)
       .where(eq(schema.checklistItems.id, id))
       .returning();
-    emitBoard(ctx.card.boardId, "checklistItem.updated", { cardId: ctx.card.id, item: updated }, originSocket(req));
+    // prevDone (L6): clients adjusted the checklist badge by +/-1 on EVERY
+    // item update, so a text-only edit drifted the "done" count
+    emitBoard(
+      ctx.card.boardId,
+      "checklistItem.updated",
+      { cardId: ctx.card.id, item: updated, prevDone: item.done },
+      originSocket(req),
+    );
 
     // checklist fully completed? → automation trigger
     if (body.done === true) {
@@ -293,8 +308,23 @@ export async function cardDetailRoutes(app: FastifyInstance) {
     const rel = path.join(cardId, `${crypto.randomUUID()}${ext}`);
     const abs = path.join(env.uploadsDir, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    const buf = await file.toBuffer();
-    await fs.writeFile(abs, buf);
+    // M6: stream to disk. toBuffer() held the whole file (up to the 1 GB
+    // limit) in the heap, so a few parallel uploads could OOM the container.
+    // Written to a .part name first so a half-written file is never served.
+    const part = `${abs}.part`;
+    try {
+      await pipeline(file.file, createWriteStream(part));
+    } catch (err) {
+      await fs.rm(part, { force: true });
+      throw err;
+    }
+    if (file.file.truncated) {
+      // the multipart fileSize limit was hit: busboy stops, the stream ends "normally"
+      await fs.rm(part, { force: true });
+      return reply.code(413).send({ error: "file too large" });
+    }
+    await fs.rename(part, abs);
+    const { size } = await fs.stat(abs);
 
     const [attachment] = await db
       .insert(schema.attachments)
@@ -303,7 +333,7 @@ export async function cardDetailRoutes(app: FastifyInstance) {
         uploaderId: req.user.id,
         filename: safeName,
         mime: file.mimetype || "application/octet-stream",
-        size: buf.length,
+        size,
         path: rel,
       })
       .returning();
@@ -325,15 +355,26 @@ export async function cardDetailRoutes(app: FastifyInstance) {
     const abs = path.resolve(env.uploadsDir, att.path);
     if (!abs.startsWith(env.uploadsDir + path.sep)) return reply.code(404).send({ error: "not found" });
     const download = (req.query as { download?: string }).download === "1";
-    const inlineSafe = /^(image\/(png|jpeg|gif|webp|avif)|application\/pdf|video\/mp4|audio\/)/.test(att.mime);
+    // L10: exact match against an allowlist. The old regex wasn't end-anchored
+    // (`image/png,text/html` matched) and was only safe because Fastify happened
+    // to coerce that header value to octet-stream while still sending `inline`.
+    const inlineSafe = INLINE_SAFE.has(att.mime);
+    let stat;
+    try {
+      stat = await fs.stat(abs);
+    } catch {
+      return reply.code(404).send({ error: "file missing" });
+    }
     reply
       .header("Content-Type", inlineSafe ? att.mime : "application/octet-stream")
+      .header("Content-Length", String(stat.size))
       .header("X-Content-Type-Options", "nosniff")
       .header(
         "Content-Disposition",
         `${download || !inlineSafe ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(att.filename)}`,
       );
-    return reply.send(await fs.readFile(abs));
+    // streamed: readFile() buffered the whole attachment per download (M6)
+    return reply.send(createReadStream(abs));
   });
 
   app.delete("/api/attachments/:id", async (req, reply) => {
@@ -355,6 +396,13 @@ export async function cardDetailRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 }
+
+/** types served inline; everything else is a download as application/octet-stream */
+const INLINE_SAFE = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+  "application/pdf", "video/mp4",
+  "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/webm", "audio/aac", "audio/flac",
+]);
 
 async function checklistCtx(checklistId: string) {
   if (!uuidSchema.safeParse(checklistId).success) return null;

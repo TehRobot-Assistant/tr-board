@@ -13,8 +13,15 @@ export function getSocketId(): string | null {
   return socket?.id ?? null;
 }
 
-/** reconnect with fresh auth after login/logout */
+/**
+ * Reconnect with fresh auth after login/logout. Reuses the SAME Socket
+ * instance: the board store and notification bell attach their listeners once,
+ * so swapping in a new instance (as this used to) left them listening to a dead
+ * socket until a full page reload. The new handshake carries the new cookie,
+ * and the store's "connect" handler re-joins the board room (H4).
+ */
 export function resetSocket(): void {
-  socket?.disconnect();
-  socket = null;
+  if (!socket) return;
+  socket.disconnect();
+  socket.connect();
 }

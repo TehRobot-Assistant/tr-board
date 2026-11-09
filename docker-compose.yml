@@ -1,10 +1,13 @@
 # TR Board — self-hosted Trello. Pulls the pre-built image from GHCR, so it
 # runs on Unraid (Compose Manager plugin) or any Docker host with no build step:
 #
-#   POSTGRES_PASSWORD=<something-long> docker compose up -d
+#   cp .env.example .env   # set POSTGRES_PASSWORD (required)
+#   docker compose up -d
 #
-# Then open http://<host>:3850 — the first account you register becomes the
-# instance admin. To build from source instead, use docker-compose.build.yml.
+# Data lives in bind mounts under /mnt/user/appdata/trboard/ (override with
+# TRBOARD_DATA on a non-Unraid host). Open http://<host>:3850 — the first
+# account you register becomes the instance admin; registration then closes.
+# To build from source instead, use docker-compose.build.yml.
 services:
   app:
     image: ghcr.io/tehrobot-assistant/tr-board:latest
@@ -13,11 +16,43 @@ services:
     ports:
       - "3850:8841" # host:container — change 3850 if taken on Unraid
     environment:
-      DATABASE_URL: postgres://trboard:${POSTGRES_PASSWORD:-trboard}@db:5432/trboard
-      # set to "false" after creating your accounts to lock the door
-      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      # No default password: compose refuses to start until POSTGRES_PASSWORD is set (.env).
+      DATABASE_URL: postgres://trboard:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/trboard
+      # Off by default: the first account becomes admin, then admins add users / invite.
+      # Set to "true" only if you want open self-sign-up.
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      # Behind NPM / a Cloudflare tunnel (see .env.example): real client IPs for
+      # the rate limits, and https detection. Empty = no proxy trusted.
+      TRUST_PROXY: ${TRUST_PROXY:-}
+      # "true" when users reach the app over https via the proxy.
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+      # Optional scheduled backups (README "Backup and restore"): /backups = the mount below.
+      BACKUP_DIR: ${BACKUP_DIR:-}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+      BACKUP_MAX_RESTORE_GB: ${BACKUP_MAX_RESTORE_GB:-50}
+      # Optional OIDC single sign-on (README "Single sign-on"); all three of
+      # ISSUER, CLIENT_ID and REDIRECT_URI turn it on.
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_TOKEN_AUTH_METHOD: ${OIDC_TOKEN_AUTH_METHOD:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      OIDC_BUTTON_LABEL: ${OIDC_BUTTON_LABEL:-Sign in with SSO}
+      OIDC_AUTO_PROVISION: ${OIDC_AUTO_PROVISION:-false}
+      OIDC_ALLOW_INSECURE_HTTP: ${OIDC_ALLOW_INSECURE_HTTP:-false}
     volumes:
-      - uploads:/data/uploads
+      # Bind mount under appdata (not a named volume) so it survives a docker.img
+      # rebuild and is covered by the Appdata Backup plugin.
+      - ${TRBOARD_DATA:-/mnt/user/appdata/trboard}/uploads:/data/uploads
+      # Scheduled backups land here when BACKUP_DIR=/backups. Prefer an array
+      # share over appdata (TRBOARD_BACKUPS=/mnt/user/backups/trboard) so one
+      # cache-pool failure can't take the database and its backups together.
+      - ${TRBOARD_BACKUPS:-${TRBOARD_DATA:-/mnt/user/appdata/trboard}/backups}:/backups
+    labels:
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/TehRobot-Assistant/tr-board/main/unraid/tr-board-icon.png"
+      net.unraid.docker.webui: "http://[IP]:[PORT:8841]/"
     depends_on:
       db:
         condition: service_healthy
@@ -28,16 +63,17 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: trboard
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: trboard
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # the postgres image starts as root and chowns this dir itself
+      - ${TRBOARD_DATA:-/mnt/user/appdata/trboard}/postgres:/var/lib/postgresql/data
+    labels:
+      # Own icon (board icon + database badge) so the DB container can be told
+      # apart from the app in Unraid's Docker tab.
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/TehRobot-Assistant/tr-board/main/unraid/tr-board-db-icon.png"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trboard -d trboard"]
       interval: 5s
       timeout: 3s
       retries: 10
-
-volumes:
-  uploads:
-  pgdata:

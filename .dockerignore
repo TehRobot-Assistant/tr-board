@@ -5,3 +5,4 @@ server/dist
 data
 .git
 *.log
+.env

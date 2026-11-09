@@ -47,7 +47,12 @@ export async function workspaceRoleOf(
 export async function boardAccess(
   userId: string,
   boardId: string,
-  opts: { isAdmin?: boolean } = {},
+  /**
+   * ignoreMembership: resolve access as if the user had no board_members row.
+   * Used when pruning implicit memberships (lib/revoke.ts) to ask "would they
+   * still see this board without the row?".
+   */
+  opts: { isAdmin?: boolean; ignoreMembership?: boolean } = {},
 ): Promise<BoardAccess | null> {
   const boardRows = await db
     .select()
@@ -64,7 +69,7 @@ export async function boardAccess(
       and(eq(schema.boardMembers.boardId, boardId), eq(schema.boardMembers.userId, userId)),
     )
     .limit(1);
-  const role = (memberRows[0]?.role ?? null) as BoardRole | null;
+  const role = opts.ignoreMembership ? null : ((memberRows[0]?.role ?? null) as BoardRole | null);
   const wsRole = await workspaceRoleOf(userId, board.workspaceId);
 
   const deny: BoardAccess = {
@@ -166,5 +171,43 @@ export async function visibleBoardIds(
     else if (b.visibility === "workspace" && wsRole) out.add(b.id);
     else if (b.visibility === "team" && wsRole && teamVisible.has(b.id)) out.add(b.id);
   }
+  return out;
+}
+
+/**
+ * Can this (other) user read the board? `false` for a nonexistent user too.
+ * Used to vet card/checklist assignees and notification targets (M8): those
+ * get card titles and board ids, so they must already be able to see them.
+ */
+export async function userCanReadBoard(userId: string, boardId: string): Promise<boolean> {
+  const [u] = await db
+    .select({ isAdmin: schema.users.isAdmin })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  if (!u) return false;
+  return !!(await boardAccess(userId, boardId, { isAdmin: u.isAdmin }))?.canRead;
+}
+
+/** all board ids this user can see, across every workspace they belong to */
+export async function allVisibleBoards(userId: string, isAdmin: boolean): Promise<Set<string>> {
+  const wsIds = isAdmin
+    ? (await db.select({ id: schema.workspaces.id }).from(schema.workspaces)).map((w) => w.id)
+    : (
+        await db
+          .select({ id: schema.workspaceMembers.workspaceId })
+          .from(schema.workspaceMembers)
+          .where(eq(schema.workspaceMembers.userId, userId))
+      ).map((w) => w.id);
+  const out = new Set<string>();
+  for (const wsId of wsIds) {
+    for (const id of await visibleBoardIds(userId, wsId, isAdmin)) out.add(id);
+  }
+  // guest boards (member of board but not its workspace)
+  const guestRows = await db
+    .select({ boardId: schema.boardMembers.boardId })
+    .from(schema.boardMembers)
+    .where(eq(schema.boardMembers.userId, userId));
+  for (const r of guestRows) out.add(r.boardId);
   return out;
 }

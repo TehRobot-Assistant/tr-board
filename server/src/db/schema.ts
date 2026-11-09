@@ -18,7 +18,9 @@ import {
   primaryKey,
   index,
   uniqueIndex,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import type { RecurrenceRule } from "../lib/recurrenceRule.js";
 
 /* ------------------------------------------------------------------ enums */
 
@@ -57,7 +59,61 @@ export const users = pgTable("users", {
   /** instance admin — can manage users + all workspaces */
   isAdmin: boolean("is_admin").notNull().default(false),
   theme: text("theme").notNull().default("system"), // system | light | dark
+  /**
+   * TOTP two-factor (lib/totp.ts). `totpSecret` is base32 and stored as-is:
+   * the server has to compute codes from it, so hashing is impossible, and
+   * anyone who can read this column can already read every board anyway.
+   * 2FA is on iff totpEnabledAt is set. `totpPendingSecret` holds a secret
+   * shown during enrolment until the first code proves the app has it.
+   * `totpLastStep` is the 30 s step of the last accepted code, so one code
+   * can't be replayed inside its validity window.
+   */
+  totpSecret: text("totp_secret"),
+  totpPendingSecret: text("totp_pending_secret"),
+  totpEnabledAt: timestamp("totp_enabled_at", { withTimezone: true }),
+  totpLastStep: bigint("totp_last_step", { mode: "number" }),
+  /** OIDC link: (issuer, subject) of the SSO identity bound to this account */
+  oidcIssuer: text("oidc_issuer"),
+  oidcSubject: text("oidc_subject"),
+  /**
+   * Calendar feed secret (routes/feeds.ts), 256-bit hex, in the feed URLs.
+   * Stored in plain text on purpose so Account settings can show the URL again
+   * for copying; a hash would mean "copy it now or regenerate". Whoever can
+   * read this column can already read every card, so hashing would protect
+   * nothing. Regenerating replaces it, which revokes the old URLs at once.
+   */
+  feedToken: text("feed_token").unique(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("users_oidc_identity_idx").on(t.oidcIssuer, t.oidcSubject)]);
+
+/**
+ * TOTP recovery codes: single use, stored as sha256. The codes are 80 random
+ * bits each, so a fast hash is enough (no dictionary to attack); argon2 would
+ * only make each recovery attempt cost 19 MiB.
+ */
+export const recoveryCodes = pgTable(
+  "recovery_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("recovery_codes_user_idx").on(t.userId)],
+);
+
+/**
+ * Instance-wide settings an instance admin changes at runtime (env vars cover
+ * the rest). Exactly one row, id = 1, created by migration 0004.
+ */
+export const instanceSettings = pgTable("instance_settings", {
+  id: integer("id").primaryKey().default(1),
+  /** every account must have TOTP on; accounts without it can only enrol */
+  require2fa: boolean("require_2fa").notNull().default(false),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const sessions = pgTable("sessions", {
@@ -162,11 +218,30 @@ export const boardMembers = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     role: boardRole("role").notNull().default("member"),
-    /** starred boards float to the top of the workspace home */
-    starred: boolean("starred").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.boardId, t.userId] })],
+);
+
+/**
+ * Starred boards float to the top of the workspace home. Its own table (review
+ * M7): stars used to be a `starred` flag on board_members, so starring a board
+ * you could read via workspace/team visibility inserted an `observer`
+ * membership, and that row kept granting read access after the board went
+ * private. A star grants nothing; perms.ts never reads this table.
+ */
+export const boardStars = pgTable(
+  "board_stars",
+  {
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.boardId, t.userId] }), index("board_stars_user_idx").on(t.userId)],
 );
 
 /** team-visibility grants: which teams can see a `visibility=team` board */
@@ -219,14 +294,30 @@ export const cards = pgTable(
     /** cover: colour token, or attachment id rendered as image cover */
     coverColor: text("cover_color"),
     coverAttachmentId: uuid("cover_attachment_id"),
-    /** mirror card: renders the source card's face, opens the source */
-    mirrorOfCardId: uuid("mirror_of_card_id"),
+    /**
+     * mirror card: renders the source card's face, opens the source. FK with
+     * cascade (L7): deleting the source (directly, or via its list/board)
+     * deletes its mirrors, matching what DELETE /api/cards/:id already did.
+     */
+    mirrorOfCardId: uuid("mirror_of_card_id").references((): AnyPgColumn => cards.id, { onDelete: "cascade" }),
+    /**
+     * Recurring card rule (lib/recurrence.ts), null = doesn't repeat. When the
+     * card's due date is marked complete, the next copy is created and the
+     * rule moves to it (so this column also works as the "already spawned"
+     * claim: see spawnNextOccurrence).
+     */
+    recurrence: jsonb("recurrence").$type<RecurrenceRule>(),
     archived: boolean("archived").notNull().default(false),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("cards_board_idx").on(t.boardId), index("cards_list_idx").on(t.listId)],
+  (t) => [
+    index("cards_board_idx").on(t.boardId),
+    index("cards_list_idx").on(t.listId),
+    // propagateMirror looks mirrors up by source on every title/label change
+    index("cards_mirror_of_idx").on(t.mirrorOfCardId),
+  ],
 );
 
 export const cardMembers = pgTable(
@@ -408,6 +499,27 @@ export const automationRuns = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("automation_runs_rule_idx").on(t.ruleId)],
+);
+
+/**
+ * due_approaching dedupe (review M10). Was an in-memory Set, so every restart
+ * re-fired every card inside its window. One row per (rule, card) holding the
+ * due date it fired for: moving the due date makes it eligible again, a
+ * restart does not.
+ */
+export const automationDueFired = pgTable(
+  "automation_due_fired",
+  {
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => automationRules.id, { onDelete: "cascade" }),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => cards.id, { onDelete: "cascade" }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.ruleId, t.cardId] })],
 );
 
 /* ------------------------------------------------------- dependencies */

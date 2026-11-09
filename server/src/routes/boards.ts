@@ -5,8 +5,10 @@ import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { workspaceRoleOf } from "../lib/perms.js";
 import { emitBoard, kickFromBoard } from "../sockets/index.js";
+import { dropLostTeamAccess } from "../lib/revoke.js";
 import { logActivity } from "../lib/activity.js";
-import { mirrorSnapshots } from "../lib/mirror.js";
+import { announceMirrorsDeleted, mirrorSnapshots, mirrorsOf } from "../lib/mirror.js";
+import { removeCardUploads } from "../lib/uploads.js";
 import { originSocket, parseBody, requireBoard, uuidSchema } from "./helpers.js";
 
 const BACKGROUNDS = [
@@ -35,6 +37,9 @@ export async function boardRoutes(app: FastifyInstance) {
       .select()
       .from(schema.workspaces)
       .where(eq(schema.workspaces.id, body.workspaceId));
+    // L2: an instance admin skips the membership lookup, so a well-formed but
+    // unknown workspaceId reached here and `ws.settings` threw (500)
+    if (!ws) return reply.code(404).send({ error: "not found" });
     if ((ws.settings.boardCreation ?? "members") === "admins" && wsRole !== "admin") {
       return reply.code(403).send({ error: "only workspace admins can create boards" });
     }
@@ -56,16 +61,18 @@ export async function boardRoutes(app: FastifyInstance) {
     const access = await requireBoard(req, reply, id, "read");
     if (!access) return;
 
-    const [listRows, cardRows, labelRows, memberRows, teamGrantRows, fieldDefs] =
+    // (rank, id): id breaks rank ties (M9) the same way the client sorts, so
+    // every viewer shows tied cards in one order
+    const [listRows, cardRows, labelRows, memberRows, teamGrantRows, fieldDefs, starRows] =
       await Promise.all([
-        db.select().from(schema.lists).where(eq(schema.lists.boardId, id)).orderBy(asc(schema.lists.rank)),
-        db.select().from(schema.cards).where(eq(schema.cards.boardId, id)).orderBy(asc(schema.cards.rank)),
+        db.select().from(schema.lists).where(eq(schema.lists.boardId, id)).orderBy(asc(schema.lists.rank), asc(schema.lists.id)),
+        db.select().from(schema.cards).where(eq(schema.cards.boardId, id)).orderBy(asc(schema.cards.rank), asc(schema.cards.id)),
         db.select().from(schema.labels).where(eq(schema.labels.boardId, id)),
         db
           .select({
             id: schema.users.id, name: schema.users.name, email: schema.users.email,
             avatarColor: schema.users.avatarColor,
-            role: schema.boardMembers.role, starred: schema.boardMembers.starred,
+            role: schema.boardMembers.role,
           })
           .from(schema.boardMembers)
           .innerJoin(schema.users, eq(schema.users.id, schema.boardMembers.userId))
@@ -76,6 +83,10 @@ export async function boardRoutes(app: FastifyInstance) {
           .from(schema.customFieldDefs)
           .where(eq(schema.customFieldDefs.boardId, id))
           .orderBy(asc(schema.customFieldDefs.rank)),
+        db
+          .select({ boardId: schema.boardStars.boardId })
+          .from(schema.boardStars)
+          .where(and(eq(schema.boardStars.boardId, id), eq(schema.boardStars.userId, req.user.id))),
       ]);
 
     const cardIds = cardRows.map((c) => c.id);
@@ -127,13 +138,14 @@ export async function boardRoutes(app: FastifyInstance) {
     const attach = new Map(attachCounts.map((r) => [r.cardId, Number(r.n)]));
     const checks = new Map(checkAgg.map((r) => [r.cardId, { total: Number(r.total), done: Number(r.done) }]));
     const mirrorSources = cardRows.filter((c) => c.mirrorOfCardId).map((c) => c.mirrorOfCardId!);
-    const mirrors = await mirrorSnapshots(mirrorSources);
+    const mirrors = await mirrorSnapshots(mirrorSources, req.user); // M2: per-viewer faces
     const links = cardIds.length
       ? await db.select().from(schema.cardLinks).where(inArray(schema.cardLinks.cardId, cardIds))
       : [];
 
     return {
       board: access.board,
+      starred: starRows.length > 0, // mine; stars are private now (M7), not on members[]
       myAccess: {
         role: access.role,
         canWrite: access.canWrite,
@@ -205,10 +217,24 @@ export async function boardRoutes(app: FastifyInstance) {
             .where(eq(schema.teams.workspaceId, board.workspaceId))
         ).map((t) => t.id),
       );
+      const before = (
+        await db.select({ teamId: schema.boardTeams.teamId }).from(schema.boardTeams).where(eq(schema.boardTeams.boardId, id))
+      ).map((r) => r.teamId);
       await db.delete(schema.boardTeams).where(eq(schema.boardTeams.boardId, id));
       const valid = teamIds.filter((t) => wsTeams.has(t));
       if (valid.length) {
         await db.insert(schema.boardTeams).values(valid.map((teamId) => ({ boardId: id, teamId })));
+      }
+      // H5: members of teams whose grant was removed lose implicit access + live room
+      const removedTeams = before.filter((t) => !valid.includes(t));
+      if (removedTeams.length) {
+        const affected = (
+          await db
+            .select({ userId: schema.teamMembers.userId })
+            .from(schema.teamMembers)
+            .where(inArray(schema.teamMembers.teamId, removedTeams))
+        ).map((r) => r.userId);
+        await dropLostTeamAccess([id], [...new Set(affected)]);
       }
     }
 
@@ -222,9 +248,15 @@ export async function boardRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const access = await requireBoard(req, reply, id, "admin");
     if (!access) return;
+    const cardIds = (
+      await db.select({ id: schema.cards.id }).from(schema.cards).where(eq(schema.cards.boardId, id))
+    ).map((c) => c.id);
+    const mirrors = (await mirrorsOf(cardIds)).filter((m) => m.boardId !== id);
     await db.delete(schema.boards).where(eq(schema.boards.id, id));
     emitBoard(id, "board.deleted", { boardId: id });
     await kickFromBoard(id);
+    announceMirrorsDeleted(mirrors); // mirrors elsewhere cascade with their sources (L7)
+    void removeCardUploads([...cardIds, ...mirrors.map((m) => m.id)]); // M6
     return { ok: true };
   });
 
@@ -256,9 +288,10 @@ export async function boardRoutes(app: FastifyInstance) {
       });
     const member = {
       id: user.id, name: user.name, email: user.email,
-      avatarColor: user.avatarColor, role, starred: false,
+      avatarColor: user.avatarColor, role,
     };
-    emitBoard(id, "board.memberUpserted", { member }, originSocket(req));
+    // boardId so clients can ignore events for a board they've left (L6)
+    emitBoard(id, "board.memberUpserted", { boardId: id, member }, originSocket(req));
     logActivity({ boardId: id, userId: req.user.id, type: "board.memberAdded", data: { member: user.name, role } });
     return { member };
   });
@@ -278,7 +311,7 @@ export async function boardRoutes(app: FastifyInstance) {
     await db
       .delete(schema.boardMembers)
       .where(and(eq(schema.boardMembers.boardId, id), eq(schema.boardMembers.userId, userId)));
-    emitBoard(id, "board.memberRemoved", { userId }, originSocket(req));
+    emitBoard(id, "board.memberRemoved", { boardId: id, userId }, originSocket(req));
     await kickFromBoard(id, userId);
     return { ok: true };
   });
@@ -298,9 +331,9 @@ export async function boardRoutes(app: FastifyInstance) {
       .onConflictDoNothing();
     const member = {
       id: req.user.id, name: req.user.name, email: req.user.email,
-      avatarColor: req.user.avatarColor, role: "member", starred: false,
+      avatarColor: req.user.avatarColor, role: "member",
     };
-    emitBoard(id, "board.memberUpserted", { member }, originSocket(req));
+    emitBoard(id, "board.memberUpserted", { boardId: id, member }, originSocket(req));
     return { ok: true };
   });
 
@@ -326,14 +359,16 @@ export async function boardRoutes(app: FastifyInstance) {
     if (!body) return;
     const access = await requireBoard(req, reply, id, "read");
     if (!access) return;
-    // starring implies membership for non-members with read access
-    await db
-      .insert(schema.boardMembers)
-      .values({ boardId: id, userId: req.user.id, role: "observer", starred: body.starred })
-      .onConflictDoUpdate({
-        target: [schema.boardMembers.boardId, schema.boardMembers.userId],
-        set: { starred: body.starred },
-      });
+    // M7: a star is a bookmark, not a membership. It used to insert an
+    // observer row, and that row kept read access alive after the board was
+    // switched to private.
+    if (body.starred) {
+      await db.insert(schema.boardStars).values({ boardId: id, userId: req.user.id }).onConflictDoNothing();
+    } else {
+      await db
+        .delete(schema.boardStars)
+        .where(and(eq(schema.boardStars.boardId, id), eq(schema.boardStars.userId, req.user.id)));
+    }
     return { ok: true };
   });
 }

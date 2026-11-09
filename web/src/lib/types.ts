@@ -1,3 +1,5 @@
+import type { Recurrence } from "./recurrence";
+
 export type User = {
   id: string;
   email: string;
@@ -5,6 +7,9 @@ export type User = {
   avatarColor: string;
   isAdmin: boolean;
   theme: "system" | "light" | "dark";
+  totpEnabled?: boolean;
+  /** instance requires 2FA and this account has none: only enrolment works */
+  mustEnrol2fa?: boolean;
 };
 
 export type Workspace = {
@@ -54,7 +59,6 @@ export type BoardMember = {
   email: string;
   avatarColor: string;
   role: BoardRole;
-  starred: boolean;
 };
 
 export type List = {
@@ -71,7 +75,7 @@ export type CardBadges = {
   checklist: { total: number; done: number } | null;
 };
 
-export type MirrorSnapshot = {
+export type MirrorFace = {
   sourceCardId: string;
   sourceBoardId: string;
   boardName: string;
@@ -80,7 +84,10 @@ export type MirrorSnapshot = {
   dueComplete: boolean;
   archived: boolean;
   labels: Array<{ name: string; color: string }>;
-} | null;
+};
+
+/** null = source deleted; restricted = you can't read the source board (server-side M2) */
+export type MirrorSnapshot = MirrorFace | { restricted: true } | null;
 
 export type Card = {
   id: string;
@@ -102,6 +109,8 @@ export type Card = {
   memberIds: string[];
   fieldValues: Record<string, unknown>;
   badges: CardBadges;
+  /** repeating card rule; null/absent = doesn't repeat */
+  recurrence?: Recurrence | null;
 };
 
 export type Label = { id: string; boardId: string; name: string; color: string };
@@ -132,6 +141,8 @@ export type CardLink = { cardId: string; blocksCardId: string };
 
 export type BoardFull = {
   board: Board;
+  /** whether *I* starred it (stars are per user and no longer on members) */
+  starred: boolean;
   myAccess: MyAccess;
   lists: List[];
   cards: Card[];

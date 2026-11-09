@@ -15,6 +15,9 @@
   --font-sans: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Funnel Display", var(--font-sans);
 
+  /* card modal goes two-pane (content | comments) from here up */
+  --breakpoint-split: 56.25rem;
+
   --radius-card: 10px;
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.06);
   --shadow-drag: 0 8px 24px rgb(0 0 0 / 0.3);

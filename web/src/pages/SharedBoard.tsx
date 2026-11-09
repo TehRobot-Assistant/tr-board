@@ -43,8 +43,9 @@ export default function SharedBoard() {
   }
   if (!data) return <div className="flex h-full items-center justify-center text-sm opacity-60">Loading…</div>;
 
-  const sorted = <T extends { rank: string }>(xs: T[]) =>
-    [...xs].sort((a, b) => (a.rank < b.rank ? -1 : 1));
+  // id breaks rank ties, same as the board store (M9)
+  const sorted = <T extends { rank: string; id: string }>(xs: T[]) =>
+    [...xs].sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   return (
     <div className={`flex h-full flex-col ${BG[data.board.background] ?? "bg-board-navy"}`}>

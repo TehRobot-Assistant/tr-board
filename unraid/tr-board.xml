@@ -5,7 +5,8 @@
   TR Board needs a PostgreSQL 16 database. Either:
     (a) EASIEST — use the Compose Manager plugin with docker-compose.yml from
         the repo, which brings up the app + Postgres together, or
-    (b) run a Postgres container yourself and point DATABASE_URL at it using
+    (b) run a Postgres container yourself (data under
+        /mnt/user/appdata/trboard/postgres) and point DATABASE_URL at it using
         this template.
 
   Add this template in Unraid via: Docker tab -> Add Container ->
@@ -15,6 +16,10 @@
   <Name>TR-Board</Name>
   <Repository>ghcr.io/tehrobot-assistant/tr-board:latest</Repository>
   <Registry>https://github.com/TehRobot-Assistant/tr-board/pkgs/container/tr-board</Registry>
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest build of main</TagDescription>
+  </Branch>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
@@ -23,8 +28,8 @@
   <Project>https://github.com/TehRobot-Assistant/tr-board</Project>
   <Overview>Self-hosted Trello with the paid features free — multi-user with team-gated visibility, real-time live sync, custom fields, Calendar/Timeline/Table/Dashboard views, unmetered Butler-style automation, admin controls, uncapped attachments, global search, "My Work", card dependencies, public intake forms, board export/copy, link sharing and card mirroring. React + Fastify + PostgreSQL.
 
-REQUIRES a PostgreSQL 16 database — set DATABASE_URL to point at it (postgres://user:password@host:5432/trboard). The first account you register becomes the instance admin. Database migrations run automatically on start.</Overview>
-  <Category>Productivity: Other: Network:Management</Category>
+REQUIRES a PostgreSQL 16 database — set DATABASE_URL to point at it (postgres://user:password@host:5432/trboard). The app refuses to start if DATABASE_URL is unset or has no password. The first account you register becomes the instance admin; after that registration is closed (admins add users) unless Allow Registration is true. Database migrations run automatically on start.</Overview>
+  <Category>Productivity:</Category>
   <WebUI>http://[IP]:[PORT:8841]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/TehRobot-Assistant/tr-board/main/unraid/tr-board.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/TehRobot-Assistant/tr-board/main/unraid/tr-board-icon.png</Icon>
@@ -32,9 +37,26 @@ REQUIRES a PostgreSQL 16 database — set DATABASE_URL to point at it (postgres:
   <PostArgs/>
   <DonateText/>
   <DonateLink/>
+  <Description>Self-hosted Trello with the paid features free: team-gated boards, live sync, custom fields, extra views and automation.</Description>
   <Config Name="WebUI Port" Target="8841" Default="3850" Mode="tcp" Description="Port the web UI is served on (host side). Change if 3850 is taken." Type="Port" Display="always" Required="true" Mask="false">3850</Config>
-  <Config Name="Database URL" Target="DATABASE_URL" Default="postgres://trboard:CHANGEME@192.168.1.10:5432/trboard" Mode="" Description="Connection string for your PostgreSQL 16 database. Point host at your Postgres container/IP." Type="Variable" Display="always" Required="true" Mask="false"></Config>
-  <Config Name="Uploads" Target="/data/uploads" Default="/mnt/user/appdata/tr-board/uploads" Mode="rw" Description="Where card attachments are stored (uncapped, on your array)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/tr-board/uploads</Config>
-  <Config Name="Allow Registration" Target="ALLOW_REGISTRATION" Default="true" Mode="" Description="Set to false once your accounts exist to close public signup (admins can still create users)." Type="Variable" Display="always" Required="false" Mask="false">true</Config>
+  <Config Name="Database URL" Target="DATABASE_URL" Default="" Mode="" Description="Connection string for your PostgreSQL 16 database, e.g. postgres://trboard:PASSWORD@192.168.1.10:5432/trboard. Required, must include a password; no default." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Uploads" Target="/data/uploads" Default="/mnt/user/appdata/trboard/uploads" Mode="rw" Description="Where card attachments are stored (uncapped). The container runs as root so it can write here." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/trboard/uploads</Config>
+  <Config Name="Allow Registration" Target="ALLOW_REGISTRATION" Default="false" Mode="" Description="Open self-sign-up. Leave false: the first account becomes admin, then admins create users in /admin. Set true only to let anyone who can reach the app register." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Trust Proxy" Target="TRUST_PROXY" Default="" Mode="" Description="Set when the app sits behind NGINX Proxy Manager or a Cloudflare tunnel, so rate limits see real client IPs and https is detected. Usual value: loopback,linklocal,uniquelocal (proxies on private addresses). Or a hop count (1), or proxy IPs/CIDRs. Leave empty for direct LAN access." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Cookie Secure" Target="COOKIE_SECURE" Default="" Mode="" Description="true = the session cookie is always Secure (https only); set this when people reach the app over https through a proxy. Empty = Secure only on requests that arrived over https. false = never." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Backups" Target="/backups" Default="/mnt/user/appdata/trboard/backups" Mode="rw" Description="Folder for scheduled backups (used when Backup Dir is /backups). An array share such as /mnt/user/backups/trboard is safer than appdata: a cache-pool failure then can't take the database and its backups together." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/trboard/backups</Config>
+  <Config Name="Backup Dir" Target="BACKUP_DIR" Default="" Mode="" Description="Set to /backups to turn on scheduled backups (DB + attachments in one .tar.gz). Empty = off; Admin &gt; Download backup works either way." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Backup Interval Hours" Target="BACKUP_INTERVAL_HOURS" Default="24" Mode="" Description="Hours between scheduled backups. Counted from the newest backup in the folder, so container restarts don't add extra ones." Type="Variable" Display="advanced" Required="false" Mask="false">24</Config>
+  <Config Name="Backup Keep" Target="BACKUP_KEEP" Default="7" Mode="" Description="How many scheduled backups to keep; older ones are deleted." Type="Variable" Display="advanced" Required="false" Mask="false">7</Config>
+  <Config Name="Backup Max Restore GB" Target="BACKUP_MAX_RESTORE_GB" Default="50" Mode="" Description="Largest backup file the Admin restore upload accepts." Type="Variable" Display="advanced" Required="false" Mask="false">50</Config>
+  <Config Name="OIDC Issuer" Target="OIDC_ISSUER" Default="" Mode="" Description="Single sign-on: the provider's issuer URL, e.g. https://auth.example.com/application/o/tr-board/ (Authentik), https://auth.example.com (Authelia) or https://accounts.google.com. SSO is on when Issuer, Client ID and Redirect URI are all set." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="OIDC Client ID" Target="OIDC_CLIENT_ID" Default="" Mode="" Description="Client ID registered at the provider." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="OIDC Client Secret" Target="OIDC_CLIENT_SECRET" Default="" Mode="" Description="Client secret registered at the provider." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="OIDC Redirect URI" Target="OIDC_REDIRECT_URI" Default="" Mode="" Description="https://YOUR-BOARD/api/auth/oidc/callback, registered at the provider exactly." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="OIDC Token Auth Method" Target="OIDC_TOKEN_AUTH_METHOD" Default="client_secret_basic" Mode="" Description="client_secret_basic or client_secret_post; match the provider's client setting." Type="Variable" Display="advanced" Required="false" Mask="false">client_secret_basic</Config>
+  <Config Name="OIDC Scopes" Target="OIDC_SCOPES" Default="openid email profile" Mode="" Description="Scopes to request. email is required for account matching." Type="Variable" Display="advanced" Required="false" Mask="false">openid email profile</Config>
+  <Config Name="OIDC Button Label" Target="OIDC_BUTTON_LABEL" Default="Sign in with SSO" Mode="" Description="Text of the SSO button on the login page." Type="Variable" Display="advanced" Required="false" Mask="false">Sign in with SSO</Config>
+  <Config Name="OIDC Auto Provision" Target="OIDC_AUTO_PROVISION" Default="false" Mode="" Description="true = create an account on first SSO login for a verified email with no account. Only takes effect while Allow Registration is true." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="OIDC Allow Insecure HTTP" Target="OIDC_ALLOW_INSECURE_HTTP" Default="false" Mode="" Description="Allow an http:// issuer (LAN-only identity provider). Never for an internet-facing one." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
   <Config Name="Session Days" Target="SESSION_DAYS" Default="30" Mode="" Description="How many days a login stays valid." Type="Variable" Display="advanced" Required="false" Mask="false">30</Config>
 </Container>

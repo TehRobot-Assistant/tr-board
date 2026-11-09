@@ -10,7 +10,7 @@ custom fields, extra views, automation, and real admin/permissions.
 **Status:** scope FINAL (2026-07-06), ready to build. Fable 5 builds it **in one
 continuous pass** — the phases in §7 are the internal build *order* (skeleton
 first, features hang off it), not separate hand-backs. Lives at
-`projects/media-tools/board/`.
+`projects/tr-studios/media-tools/board/`.
 
 > Replaces the "dashboard" part of the old `media-tools` project (a static
 > status board reading `projects.csv` / `portfolio.json`). The other tools in

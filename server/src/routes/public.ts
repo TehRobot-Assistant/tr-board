@@ -18,8 +18,8 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!board || board.archived) return reply.code(404).send({ error: "not found" });
 
     const [lists, cards, labels] = await Promise.all([
-      db.select().from(schema.lists).where(eq(schema.lists.boardId, board.id)).orderBy(asc(schema.lists.rank)),
-      db.select().from(schema.cards).where(eq(schema.cards.boardId, board.id)).orderBy(asc(schema.cards.rank)),
+      db.select().from(schema.lists).where(eq(schema.lists.boardId, board.id)).orderBy(asc(schema.lists.rank), asc(schema.lists.id)),
+      db.select().from(schema.cards).where(eq(schema.cards.boardId, board.id)).orderBy(asc(schema.cards.rank), asc(schema.cards.id)),
       db.select().from(schema.labels).where(eq(schema.labels.boardId, board.id)),
     ]);
     const cardIds = cards.map((c) => c.id);
@@ -27,14 +27,17 @@ export async function publicRoutes(app: FastifyInstance) {
       ? await db.select().from(schema.cardLabels).where(inArray(schema.cardLabels.cardId, cardIds))
       : [];
 
+    // L3: archiving a list hides its cards too. Mirrors are left out: their
+    // face belongs to another board, which a share link never grants (M2).
+    const openLists = lists.filter((l) => !l.archived);
+    const openListIds = new Set(openLists.map((l) => l.id));
+
     reply.header("Cache-Control", "no-store");
     return {
       board: { name: board.name, background: board.background },
-      lists: lists
-        .filter((l) => !l.archived)
-        .map((l) => ({ id: l.id, name: l.name, rank: l.rank })),
+      lists: openLists.map((l) => ({ id: l.id, name: l.name, rank: l.rank })),
       cards: cards
-        .filter((c) => !c.archived)
+        .filter((c) => !c.archived && openListIds.has(c.listId) && !c.mirrorOfCardId)
         .map((c) => ({
           id: c.id, listId: c.listId, title: c.title, description: c.description,
           rank: c.rank, dueAt: c.dueAt, dueComplete: c.dueComplete,

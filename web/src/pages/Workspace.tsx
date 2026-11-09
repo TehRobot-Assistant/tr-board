@@ -445,7 +445,12 @@ function SettingsTab({ workspace, onChange }: { workspace: Workspace; onChange: 
         <button
           className="btn-danger mt-2"
           onClick={async () => {
-            if (!confirm(`Delete workspace "${workspace.name}" and ALL its boards? This cannot be undone.`)) return;
+            // L9: say how much goes, including private boards the admin can't
+            // open (deleting the workspace still takes them; that's unchanged)
+            const impact = await api.get<{ boards: number; privateBoards: number; hiddenPrivateBoards: number }>(
+              `/api/workspaces/${workspace.id}/deletion-impact`,
+            );
+            if (!confirm(deleteWorkspaceMessage(workspace.name, impact))) return;
             await api.del(`/api/workspaces/${workspace.id}`);
             location.href = "/";
           }}
@@ -455,4 +460,20 @@ function SettingsTab({ workspace, onChange }: { workspace: Workspace; onChange: 
       </div>
     </div>
   );
+}
+
+export function deleteWorkspaceMessage(
+  name: string,
+  { boards, privateBoards, hiddenPrivateBoards }: { boards: number; privateBoards: number; hiddenPrivateBoards: number },
+): string {
+  const n = (k: number, word: string) => `${k} ${word}${k === 1 ? "" : "s"}`;
+  let msg = `Delete workspace "${name}" and all ${n(boards, "board")} in it?`;
+  if (privateBoards > 0) {
+    msg += `\n\nThis includes ${n(privateBoards, "private board")}`;
+    msg +=
+      hiddenPrivateBoards > 0
+        ? `, ${hiddenPrivateBoards === privateBoards ? (privateBoards === 1 ? "which" : "all of which") : `${hiddenPrivateBoards} of which`} you can't open.`
+        : ".";
+  }
+  return `${msg}\n\nThis cannot be undone.`;
 }

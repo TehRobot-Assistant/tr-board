@@ -58,7 +58,8 @@ function NotificationsBell() {
     const s = getSocket();
     const fn = () => qc.invalidateQueries({ queryKey: ["notifications"] });
     s.on("notification", fn);
-    return () => { s.off("notification", fn); };
+    s.on("connect", fn); // H4: catch up on notifications missed while disconnected
+    return () => { s.off("notification", fn); s.off("connect", fn); };
   }, [qc]);
 
   const items = data?.notifications ?? [];
@@ -164,6 +165,9 @@ export function TopBar({ transparent = false }: { transparent?: boolean }) {
                 </div>
               </div>
               <div className="border-t border-rule pt-1 dark:border-ink-3">
+                <Link to="/account" className="btn-ghost w-full justify-start text-sm" onClick={() => setOpen(false)}>
+                  Account settings
+                </Link>
                 <button
                   className="btn-ghost w-full justify-start text-sm"
                   onClick={async () => { await logout(); nav("/login"); }}
